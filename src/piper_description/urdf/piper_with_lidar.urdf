@@ -1,0 +1,324 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="piper_with_lidar">
+
+  <link name="world"/>
+  <joint name="fixed_base_joint" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+  </joint>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/base_link.STL" />
+      </geometry>
+      <material name="piper_grey">
+        <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link1.STL" />
+      </geometry>
+      <material name="piper_grey" />
+    </visual>
+  </link>
+  <joint name="joint1" type="revolute">
+    <origin xyz="0 0 0.123" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="link1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.618" upper="2.618" effort="100" velocity="5" />
+  </joint>
+
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link2.STL" />
+      </geometry>
+      <material name="piper_grey" />
+    </visual>
+  </link>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0 0 0" rpy="1.5708 -0.1359 -3.1416" />
+    <parent link="link1" />
+    <child link="link2" />
+    <axis xyz="0 0 1" />
+    <limit lower="0" upper="3.14" effort="100" velocity="5" />
+  </joint>
+
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link3.STL" />
+      </geometry>
+      <material name="piper_grey" />
+    </visual>
+  </link>
+  <joint name="joint3" type="revolute">
+    <origin xyz="0.28503 0 0" rpy="0 0 -1.7939" />
+    <parent link="link2" />
+    <child link="link3" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.967" upper="0" effort="100" velocity="5" />
+  </joint>
+
+  <link name="link4">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link4.STL" />
+      </geometry>
+      <material name="piper_grey" />
+    </visual>
+  </link>
+  <joint name="joint4" type="revolute">
+    <origin xyz="-0.021984 -0.25075 0" rpy="1.5708 0 0" />
+    <parent link="link3" />
+    <child link="link4" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.745" upper="1.745" effort="100" velocity="5" />
+  </joint>
+
+  <link name="link5">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link5.STL" />
+      </geometry>
+      <material name="piper_grey" />
+    </visual>
+  </link>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0 0 0" rpy="-1.5708 0 0" />
+    <parent link="link4" />
+    <child link="link5" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.22" upper="1.22" effort="100" velocity="5" />
+  </joint>
+
+  <link name="link6">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://piper_description/meshes/link6.STL" />
+      </geometry>
+      <material name="piper_light_grey">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+  </link>
+  <joint name="joint6" type="revolute">
+    <origin xyz="8.8259E-05 -0.091 0" rpy="1.5708 0 0" />
+    <parent link="link5" />
+    <child link="link6" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.0944" upper="2.0944" effort="100" velocity="3" />
+  </joint>
+
+  <!-- 마운트 판(30x30x1cm) + 좌/우/위 벽(1cm 두께, 4cm 높이) - preview_plate.py에서 확정한 지오메트리에
+       2026-09-04 실물 대조 후 link6 Z축(마운트 바깥 방향) 기준 90도 반시계 회전을 적용했고, 그 위에
+       추가로 반시계 13.2도를 더 얹음 - 브라켓이 J6=0도 위치에 물리적으로 정위치가 아니게 조립되어
+       있는 걸 보정하는 값(18도 시계방향 -> 13.21 -> 12.21 -> 13 -> 13.2도 반시계로 미세조정).
+       (판+벽+라이다 전체를 강체로 묶어서 회전 - 서로간 상대 위치/방향은 그대로, link6 기준 자세만 회전). -->
+  <link name="mount_plate">
+    <visual>
+      <geometry><box size="0.30 0.30 0.01" /></geometry>
+      <material name="plate_orange"><color rgba="0.85 0.55 0.15 1" /></material>
+    </visual>
+  </link>
+  <joint name="mount_plate_joint" type="fixed">
+    <origin xyz="-0.0973579 -0.0228351 0.005" rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="mount_plate" />
+  </joint>
+
+  <link name="wall_left">
+    <visual>
+      <geometry><box size="0.01 0.30 0.04" /></geometry>
+      <material name="wall_orange"><color rgba="0.6 0.35 0.1 1" /></material>
+    </visual>
+  </link>
+  <joint name="wall_left_joint" type="fixed">
+    <origin xyz="-0.064247 -0.164004 0.03" rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="wall_left" />
+  </joint>
+
+  <link name="wall_right">
+    <visual>
+      <geometry><box size="0.01 0.30 0.04" /></geometry>
+      <material name="wall_orange" />
+    </visual>
+  </link>
+  <joint name="wall_right_joint" type="fixed">
+    <origin xyz="-0.130469 0.118334 0.03" rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="wall_right" />
+  </joint>
+
+  <link name="wall_top">
+    <visual>
+      <geometry><box size="0.30 0.01 0.04" /></geometry>
+      <material name="wall_orange" />
+    </visual>
+  </link>
+  <joint name="wall_top_joint" type="fixed">
+    <origin xyz="-0.238527 -0.055946 0.03" rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="wall_top" />
+  </joint>
+
+  <!-- 추가 30cm x 20cm x 1cm 판 -->
+  <link name="extension_plate">
+    <visual>
+      <geometry>
+        <box size="0.30 0.20 0.01" />
+      </geometry>
+      <material name="plate_orange" />
+    </visual>
+  </link>
+
+  <joint name="extension_plate_joint" type="fixed">
+    <origin xyz="0.146037 0.034253 0.005"
+            rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="extension_plate" />
+  </joint>
+
+
+  <!-- 추가 구간 왼쪽 벽 -->
+  <link name="extension_wall_left">
+    <visual>
+      <geometry>
+        <box size="0.01 0.20 0.04" />
+      </geometry>
+      <material name="wall_orange" />
+    </visual>
+  </link>
+
+  <joint name="extension_wall_left_joint" type="fixed">
+    <origin xyz="0.179148 -0.106916 0.03"
+            rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="extension_wall_left" />
+  </joint>
+
+
+  <!-- 추가 구간 오른쪽 벽 -->
+  <link name="extension_wall_right">
+    <visual>
+      <geometry>
+        <box size="0.01 0.20 0.04" />
+      </geometry>
+      <material name="wall_orange" />
+    </visual>
+  </link>
+
+  <joint name="extension_wall_right_joint" type="fixed">
+    <origin xyz="0.112926 0.175422 0.03"
+            rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="extension_wall_right" />
+  </joint>
+
+
+  <!-- 새 바깥쪽 끝 벽 -->
+  <link name="wall_bottom">
+    <visual>
+      <geometry>
+        <box size="0.30 0.01 0.04" />
+      </geometry>
+      <material name="wall_orange" />
+    </visual>
+  </link>
+
+  <joint name="wall_bottom_joint" type="fixed">
+    <origin xyz="0.238527 0.055946 0.03"
+            rpy="0 0 1.80118" />
+    <parent link="link6" />
+    <child link="wall_bottom" />
+  </joint>
+
+  <!-- CygLiDAR D1 mount (2개, 판떼기 양쪽에 대칭 장착, 2026-09-09부터 lidar_1/lidar_2로 구분):
+       preview_plate.py에서 실측한 마운트 플레이트+브라켓 오프셋에 위 회전들을 동일하게 합성
+       적용함. link6(손목) 기준 위쪽 벽 바깥면 중앙에 센서가 부착됨. -->
+  <link name="lidar_1_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.037 0.024 0.037" />
+      </geometry>
+      <material name="lidar_black">
+        <color rgba="0.1 0.1 0.1 1" />
+      </material>
+    </visual>
+  </link>
+  <joint name="lidar_1_joint" type="fixed">
+    <!-- 2026-09-04: 실물 대조 결과 Y축(녹색)이 실제 센서 정면(=판떼기가 바깥을 향하는 방향)과
+         안 맞아서 재조정. 기존 X축 방향을 새 Y(정면)로, 기존 Y축 방향을 새 X로 재배정하고
+         Z축은 그대로 유지(Rz(90도)를 로컬 프레임에 추가 합성).
+         2026-09-09: 실물 대조 결과 X(빨강)는 아래로, Z(파랑)는 기존 X 자리로, Y(초록)는
+         그대로 유지해야 한다고 확인됨 - 로컬 Y축 기준 +90도 회전을 추가로 합성(roll/pitch는
+         이 회전과 우연히 불변이라 그대로, yaw만 -166.8도->-76.8도로 바뀜; 계산 검증 완료).
+         이어서 같은 날 재확인: 이번엔 파란(Z) 축 기준 반시계 90도 추가 필요 확인
+         (X->기존 Y 위치, Y->기존 -X 위치, Z 그대로) - 로컬 Z축 기준 +90도 회전을 추가로 합성
+         (roll 0, pitch -90, yaw 13.2도로 바뀜; 계산 검증 완료). -->
+    <origin xyz="-0.255078 -0.0598279 0.03" rpy="0.0 -1.570796 0.230383" />
+    <parent link="link6" />
+    <child link="lidar_1_link" />
+  </joint>
+
+  <!-- 포인트클라우드 전용 좌표계. cyglidar_d1_ros2 드라이버(Topic3D.cpp)는 표준 ROS 관례
+       (X=전방, Y=왼쪽, Z=위)로 점을 발행하는데, lidar_1_link의 축은 마운트 박스 형상(Y=얇은
+       두께=바깥쪽)에 맞춰 잡은 거라 데이터 축과 다르다. lidar_1_link의 Y(검증된 바깥쪽 방향)를
+       optical 프레임의 X(전방)로 매핑 - cyglidar_d1_publisher의 frame_id를 이걸로 바꿔야 함. -->
+  <link name="lidar_1_optical_frame" />
+  <joint name="lidar_1_optical_joint" type="fixed">
+    <!-- 2026-09-09: 90도 추가(180도)가 반대 방향으로 틀어져서, 원래 90도에서 반대 방향으로
+         90도 돌려 0도로 변경함. -->
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="lidar_1_link" />
+    <child link="lidar_1_optical_frame" />
+  </joint>
+
+  <link name="lidar_2_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <box size="0.037 0.024 0.037" />
+      </geometry>
+      <material name="lidar_black" />
+    </visual>
+  </link>
+
+  <joint name="lidar_2_joint" type="fixed">
+    <!-- 2026-09-09: 판떼기 반대쪽에 lidar_1과 동일 기종을 대칭 장착. 위치는 lidar_1_joint의
+         xyz를 부호 반전(대칭 위치)함. 회전 보정 이력:
+         1) 파란(Z)축 기준 반시계 90도(lidar_1의 첫 보정과 동일) - roll 0/pitch -90/yaw -76.8도.
+         2) 이어서 빨강(X)축 기준 -90도 추가 확인(초록->기존 -파랑 위치, 파랑->기존 초록 위치,
+            빨강 고정) - 로컬 X축 기준 -90도 합성, roll -90/pitch -90/yaw -76.8도로 변경;
+            계산 검증 완료. -->
+    <origin xyz="0.255078 0.0598279 0.03"
+            rpy="-1.570796 -1.570796 -1.340413" />
+    <parent link="link6" />
+    <child link="lidar_2_link" />
+  </joint>
+
+  <!-- lidar_1_optical_joint와 같은 개념(포인트클라우드 데이터 축 매핑). lidar_1 것과 같은 값을
+       임시로 복사해둠 - lidar_2_joint 회전이 아직 검증 전이라 이것도 같이 재검증 필요. -->
+  <link name="lidar_2_optical_frame" />
+  <joint name="lidar_2_optical_joint" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="lidar_2_link" />
+    <child link="lidar_2_optical_frame" />
+  </joint>
+
+</robot>

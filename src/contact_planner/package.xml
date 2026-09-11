@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>contact_planner</name>
+  <version>0.0.0</version>
+  <description>/lidar_1/scan_3D + /lidar_2/scan_3D_corrected를 각각 base_link로 TF 변환 후 merge, RANSAC으로 평면검출해 접촉점/pre-contact 지점을 계산하고 /piper/target_pose와 RViz 마커로 발행 (2026-09-07: plane_detector 병합, 2026-09-09: 2-라이다 merge 리팩터링, 2026-09-10: message_filters로 동기화)</description>
+  <maintainer email="hyeokey@todo.todo">hyeokey</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>message_filters</depend>
+  <!-- pyransac3d, numpy, pybullet은 rosdep 키가 없는 pip 패키지라 venv에 설치함
+       (source ~/gpr_robot/.venv/bin/activate 후 pip install pyransac3d numpy pybullet) -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
