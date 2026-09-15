@@ -103,11 +103,28 @@ ARRIVAL_HOLD_TICKS = 20  # 100Hz 루프 기준 0.2초 연속 유지해야 "도�
 # 형태)로 수렴하는데, 지금까지는 이전 프레임 결과 하나만 시드로 썼다. solve_ik_best()가 몇 개
 # 대안 시드로도 같이 풀어서 관절 한계 여유가 가장 큰 해를 고르도록 확장한다(REST_POSE 계속
 # 성 유지를 위해, 기존 시드가 이미 충분히 여유 있으면 그대로 쓰고 위험할 때만 전환).
-IK_POS_TOL_M = 0.005    # 이 이상 벗어나면 그 시드에서 IK가 실제로 수렴 못 한 것으로 보고 후보 제외
+IK_POS_TOL_M = 0.02     # 이 이상 벗어나면 그 시드에서 IK가 실제로 수렴 못 한 것으로 보고 후보 제외
+# 2026-09-15 실측: 5mm는 너무 빡빡했다 - 큰 점프(수십cm) 목표에서 방향은 0.1도 미만으로 거의
+# 완벽하고 관절여유도 25~36도로 넉넉한 좋은 해들이 위치오차 12~23mm에서 그대로 멈춰(반복횟수를
+# 200->5000, 정밀도를 1e-6->1e-10으로 훨씬 강하게 줘도 12mm대에서 전혀 안 줄어듦 - 탐색 부족이
+# 아니라 그 위치+방향 조합 자체가 정확히는 도달 불가능한 진짜 기구학적 한계) "5mm 초과"라는
+# 이유만으로 전부 거부되고 있었다. MIT 저수준 PD 자체의 실측 잔차(2~4cm)보다도 이 IK 여유가
+# 더 타이트했으니 애초에 안 맞는 기준이었음 - 20mm로 완화.
 IK_ORN_TOL_DEG = 2.0
 IK_MARGIN_DANGER_DEG = 10.0  # 현재(연속성 유지) 해의 최소 관절여유가 이 밑으로 내려가면 대안 탐색
 IK_MARGIN_SWITCH_BENEFIT_DEG = 5.0  # 대안이 이만큼 더 나아야 분기 전환(사소한 차이로 계속
 # 전환/흔들리는 것 방지)
+
+# 2026-09-15 실측: 이 팔은 명령을 하나도 안 받은 "쉬는" anchor 자세에서부터 이미 joint5가
+# 76도 근처(JOINT_LIMITS_DEG 한계 70도)에 있는 게 여러 세션에 걸쳐 반복 확인됐다(joint2도
+# 살짝 음수로 비슷하게 반복됨) - 명령이 튀어서 그런 게 아니라 이 개별 팔의 원래 상태라, 아마
+# JOINT_LIMITS_DEG(주석상 "piper_sdk JointCtrl 제한과 동일")과 실제 MIT 모드 가동범위/개체별
+# 영점보정 사이에 몇 도 차이가 있는 것으로 보인다(공식 하드스톱 자체가 몇 도 다르다는 뜻은
+# 아님 - 확인 필요, CLAUDE.md 참고). margin<0(관절한계 초과)을 그대로 하드 거부 기준으로 쓰면
+# 이 팔은 사실상 아무 목표도 못 받는다(실측: 8개 시드 전부 거부) - IK_HARD_LIMIT_SLACK_DEG만큼
+# 여유를 두고 거부한다. 관절이 완전히 걸려버리는 것보단 안전하게 조금 더 허용하는 쪽으로
+# 판단했지만, 진짜 물리적 하드스톱 위치는 다음에 Piper 공식 스펙으로 재확인할 것.
+IK_HARD_LIMIT_SLACK_DEG = 8.0
 
 # 2026-09-15: quat_from_z_axis(contact_planner_node)가 만드는 목표 orientation은 접근축(로컬
 # Z, 벽 법선 방향)만 의미가 있고, 그 축 둘레 회전(roll)은 태스크상 자유도인데 임의의 최단회전
@@ -166,10 +183,26 @@ def solve_ik(ik_robot, joint_indices, rest_pose, target_pos, target_orn):
 # (전부 0) 4개 전부 실패하는 실측 사례 발견 - 위치만 따로 풀면 2mm대로 잘 수렴하는(=팔의 물리적
 # 도달범위 안) 목표인데도 그랬다. 원인은 "시드가 엉뚱한 동네": neutral(전부 0)은 팔이 거의
 # 접힌 자세라 이런 먼 목표엔 애초에 안 닿고, 나머지는 전부 (역시 먼) 현재 자세에서 파생된
-# 변형이라 같은 문제를 공유한다. CANONICAL_REACH_SEED_DEG(팔꿈치를 편 "j2=90,j3=-90" 일반
-# 자세, joint1은 어차피 DLS가 알아서 돌려 맞춤)를 시드로 주면 관절여유 수십 도짜리 해가 쉽게
-# 나오는 걸 시뮬레이션으로 확인 - 대안 시드에 추가한다.
-CANONICAL_REACH_SEED_DEG = [0.0, 90.0, -90.0, 0.0, 0.0, 0.0]
+# 변형이라 같은 문제를 공유한다. "팔꿈치를 편 j2=90,j3=-90 일반 자세"를 시드로 주면 관절여유
+# 수십 도짜리 해가 쉽게 나오는 걸 확인했는데, joint1(어깨 요) 값 하나만 고정해서 시드로 주면
+# (예: joint1=0) 그 특정 joint1 근방으로만 DLS가 수렴하려는 경향이 있어서 여전히 못 찾는 목표가
+# 있었다(실측: joint1=0 근방 시드론 실패, joint1=-30 근방 시드는 성공하는 같은 목표 확인).
+# joint1을 CANONICAL_REACH_JOINT1_DEG 간격으로 훑은 여러 개를 전부 시드로 준다 - 같은 "팔 뻗은"
+# 팔꿈치 모양이지만 몸을 어느 쪽으로 돌리고 뻗을지 다양하게 제시하는 셈.
+CANONICAL_REACH_JOINT1_DEG = [-120.0, -60.0, 0.0, 60.0, 120.0]
+CANONICAL_REACH_ELBOW_DEG = [90.0, -90.0]  # joint2, joint3
+
+
+def _canonical_reach_seeds(pose_len):
+    """CANONICAL_REACH_JOINT1_DEG 각 값 x 고정 팔꿈치 모양(CANONICAL_REACH_ELBOW_DEG)의 "팔
+    뻗은" 시드들 - 현재/이전 자세와 무관하게 항상 같은 후보를 제시한다(_ik_alt_seeds/
+    _recover_via_roll_sweep 양쪽에서 재사용)."""
+    seeds = []
+    for j1_deg in CANONICAL_REACH_JOINT1_DEG:
+        deg6 = [j1_deg, CANONICAL_REACH_ELBOW_DEG[0], CANONICAL_REACH_ELBOW_DEG[1], 0.0, 0.0, 0.0]
+        seed = [math.radians(d) for d in deg6] + [0.0] * (pose_len - 6)
+        seeds.append(seed)
+    return seeds
 
 
 def _ik_alt_seeds(primary_rest_pose):
@@ -181,8 +214,8 @@ def _ik_alt_seeds(primary_rest_pose):
       완전히 다른 관절값으로 피해갈 수 있음. 틀린 가정이어도 solve_ik_best가 FK로 실제 수렴
       여부를 검증하므로 안전 - 그냥 그 후보가 버려질 뿐.
     - neutral: 전부 0인 중립 자세 - 폭넓은 탐색용 fallback.
-    - canonical_reach: primary_rest_pose와 무관한 고정된 "팔 뻗은" 일반 자세(CANONICAL_REACH_SEED_DEG)
-      - 현재/neutral 둘 다 안 통하는 큰 점프(첫 목표 등)에 대응."""
+    - canonical_reach_*: primary_rest_pose와 무관한 고정된 "팔 뻗은" 일반 자세 여러 개
+      (_canonical_reach_seeds) - 현재/neutral 둘 다 안 통하는 큰 점프(첫 목표 등)에 대응."""
     elbow_flip = list(primary_rest_pose)
     elbow_flip[2] = -elbow_flip[2]
 
@@ -193,10 +226,7 @@ def _ik_alt_seeds(primary_rest_pose):
 
     neutral = [0.0] * len(primary_rest_pose)
 
-    canonical_reach = [math.radians(d) for d in CANONICAL_REACH_SEED_DEG]
-    canonical_reach += [0.0] * (len(primary_rest_pose) - len(canonical_reach))
-
-    return [elbow_flip, wrist_flip, neutral, canonical_reach]
+    return [elbow_flip, wrist_flip, neutral] + _canonical_reach_seeds(len(primary_rest_pose))
 
 
 def _joint_limit_margin_deg(sol_rad):
@@ -238,25 +268,26 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
     primary_margin_raw = _joint_limit_margin_deg(primary_sol)
     primary_ok = (math.dist(primary_fk_pos, target_pos) < IK_POS_TOL_M
                   and orientation_angle_diff_deg(primary_fk_orn, target_orn) < IK_ORN_TOL_DEG
-                  and primary_margin_raw >= 0.0)
+                  and primary_margin_raw >= -IK_HARD_LIMIT_SLACK_DEG)
     primary_margin = primary_margin_raw if primary_ok else -1e9
 
     if primary_ok and primary_margin >= IK_MARGIN_DANGER_DEG:
         return primary_sol  # 이미 충분히 안전 - 대안 탐색 안 함(연속성 유지)
 
+    alt_labels = ["elbow_flip", "wrist_flip", "neutral"] + [
+        f"canonical_reach_j1={j1_deg:+.0f}" for j1_deg in CANONICAL_REACH_JOINT1_DEG]
+
     best_sol, best_margin, best_label = primary_sol, primary_margin, "primary"
     any_converged = primary_ok
-    for label, seed in zip(
-            ("elbow_flip", "wrist_flip", "neutral", "canonical_reach"),
-            _ik_alt_seeds(primary_rest_pose)):
+    for label, seed in zip(alt_labels, _ik_alt_seeds(primary_rest_pose)):
         sol = solve_ik(ik_robot, joint_indices, seed, target_pos, target_orn)
         fk_pos, fk_orn = tip_pose(ik_robot, joint_indices, [math.degrees(a) for a in sol[:6]])
         margin = _joint_limit_margin_deg(sol)
         if (math.dist(fk_pos, target_pos) >= IK_POS_TOL_M
                 or orientation_angle_diff_deg(fk_orn, target_orn) >= IK_ORN_TOL_DEG
-                or margin < 0.0):
+                or margin < -IK_HARD_LIMIT_SLACK_DEG):
             continue  # 이 시드에서는 IK가 실제로 목표에 수렴 못 하거나(위치/방향) 관절한계를
-            # 벗어난 해라 후보 제외
+            # (슬랙 이상) 벗어난 해라 후보 제외
         any_converged = True
         if margin > best_margin + IK_MARGIN_SWITCH_BENEFIT_DEG:
             best_sol, best_margin, best_label = sol, margin, label
@@ -264,8 +295,8 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
     if not any_converged:
         if logger is not None:
             logger.error(
-                "IK 완전 실패 - primary + 대안(elbow_flip/wrist_flip/neutral/canonical_reach) "
-                "5개 시드 전부 이 목표에 수렴 못 함(위치tol "
+                f"IK 완전 실패 - primary + 대안 {len(alt_labels)}개 시드"
+                f"({'/'.join(alt_labels)}) 전부 이 목표에 수렴 못 함(위치tol "
                 f"{IK_POS_TOL_M*1000:.0f}mm/방향tol "
                 f"{IK_ORN_TOL_DEG:.1f}도 밖). 검증 안 된 해를 실행하지 않고 이 목표를 "
                 "거부합니다 - 현재 자세를 유지합니다."
@@ -303,12 +334,11 @@ def _recover_via_roll_sweep(ik_robot, joint_indices, rest_pose, target_pos, targ
 
     2026-09-15: coarse 단계 시드로 rest_pose(연속성) 하나만 쓰면, 노드가 막 시작해서 큰 점프
     (수십cm)를 처음 풀어야 할 때 실패한다는 게 실측으로 확인됐다(rest_pose 자체가 목표에서
-    너무 먼 "엉뚱한 동네"라 어떤 roll을 줘도 DLS가 못 찾음 - CANONICAL_REACH_SEED_DEG 설명
-    참고). CANONICAL_REACH_SEED_DEG도 같이 시드로 써서, 둘 중 하나라도 그 roll에서 수렴하면
-    후보로 채택한다."""
-    canonical_seed = [math.radians(d) for d in CANONICAL_REACH_SEED_DEG]
-    canonical_seed += [0.0] * (len(rest_pose) - len(canonical_seed))
-    coarse_seeds = (rest_pose, canonical_seed)
+    너무 먼 "엉뚱한 동네"라 어떤 roll을 줘도 DLS가 못 찾음 - _canonical_reach_seeds 설명 참고).
+    canonical_reach 시드들(joint1을 여러 각도로 훑은 것)도 같이 써서, 그중 하나라도 그 roll에서
+    수렴하면 후보로 채택한다 - joint1 하나만 고정한 단일 시드로는 여전히 못 찾는 목표가 실측으로
+    확인됐다(같은 목표를 joint1=0 시드로는 실패, joint1=-30 근방 시드로는 성공)."""
+    coarse_seeds = (rest_pose,) + tuple(_canonical_reach_seeds(len(rest_pose)))
 
     candidates = []
     steps = int(round(360.0 / IK_ROLL_SWEEP_STEP_DEG))
@@ -321,8 +351,8 @@ def _recover_via_roll_sweep(ik_robot, joint_indices, rest_pose, target_pos, targ
             margin = _joint_limit_margin_deg(sol)
             if (math.dist(fk_pos, target_pos) >= IK_POS_TOL_M
                     or orientation_angle_diff_deg(fk_orn, rolled_orn) >= IK_ORN_TOL_DEG
-                    or margin < 0.0):
-                continue  # 이 roll+시드 조합에서는 IK가 수렴 못 하거나 관절한계를 벗어난 해 - 후보 제외
+                    or margin < -IK_HARD_LIMIT_SLACK_DEG):
+                continue  # 이 roll+시드 조합에서는 IK가 수렴 못 하거나 관절한계를(슬랙 이상) 벗어난 해 - 후보 제외
             candidates.append((theta_deg, margin, math.degrees(sol[5])))
 
     if not candidates:

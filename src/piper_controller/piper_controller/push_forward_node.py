@@ -53,6 +53,11 @@ TARGET_TIMEOUT_S에 안 걸리게).
      CAPTURE(_try_capture)를 호출해 이제부터의 push_dir/plate_orn0을 새로 캡처하고 PUSH로
      전환한다.
 
+  ⚠️ 2026-09-15 재설계: 위 2)~3)(판 전체를 피벗 기준으로 회전시키는 6축 Cartesian 목표 계산)은
+  실측 발산 사고 이후 폐기됐다 - 지금은 joint1/2/3/6을 그대로 둔 채 joint4/5만 grid search로
+  조정하는 방식으로 바뀌었다. 자세한 이유/설계는 이 파일의 LEVEL 관련 상수 블록 주석
+  (WRIST_JOINT_INDICES 등) 참고. 3)/4)의 "정지 확인 후 재계산" 구조 자체는 그대로 유지.
+
 정지 조건: 2026-09-11 초기 버전은 lidar_2 scan_image 무효 픽셀 비율로 접촉 근접을 자동
 감지해서 정지했는데, 실측 결과 완전히 안 붙은 상태에서도 이미 96~97%로 문턱(0.7, 0.9로
 올려봐도 마찬가지)을 넘어있어서 신호로 못 씀 - 사용자 요청으로 이 자동 정지 로직은 제거.
@@ -64,6 +69,9 @@ lidar_2 무효 비율은 여전히 구독해서 로그에는 참고용으로 찍
 ⚠️ 이 노드는 /piper/target_pose에 직접 발행한다 - piper_controller_node가 떠 있으면 즉시
 실행됨(게이트 없음). contact_planner_node로 이미 정렬된 상태에서만 실행할 것."""
 import math
+import os
+import sys
+from collections import deque
 
 import numpy as np
 import pybullet as p
@@ -74,7 +82,13 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState
+
+GPR_ROBOT_DIR = os.path.expanduser("~/gpr_robot")
+if GPR_ROBOT_DIR not in sys.path:
+    sys.path.insert(0, GPR_ROBOT_DIR)
+
+from sim_view import IK_LOWER, IK_UPPER, JOINT_NAMES, TIP_LINK_INDEX, load_ik_model  # noqa: E402
 
 BASE_FRAME = "base_link"
 PLATE_FRAME = "extension_plate"  # 실제 제어 기준(목표 pose)으로 삼는 프레임
@@ -113,60 +127,54 @@ STATE_HOLD = "HOLD"
 # 2026-09-15 LEVEL 단계 (모듈 docstring 참고).
 LEVEL_SPREAD_TOL_M = 0.003  # 4개 모서리 거리 퍼짐(최대-최소)이 이 이내면 "평평해짐"
 LEVEL_HOLD_TICKS = 3  # 노이즈 한 틱으로 오판 안 하게 연속으로 이만큼 유지돼야 확정 (TICK=PUSH_STEP_PERIOD_S)
-LEVEL_MAX_CORRECTION_DEG = 30.0  # 이보다 큰 보정이 계산되면 벽 평면 데이터가 이상한 것으로 보고 거부(안전장치)
 
-# 2026-09-15 실측 사고 대응: 매 tick 무조건 새 목표를 계산했더니, 팔이 이전 목표에 도달하기도
-# 전에 "지금 이 순간(아직 안정 안 된 중간 상태)"을 새 기준으로 또 완전한 보정을 계산하는
-# 일이 반복되면서 피벗이 매 tick 밀려나고 그 위에 보정이 계속 쌓이는 양성 피드백으로 발산함
-# (extension_wall_right 거리가 4.5->9.9cm로, 보정각이 4.6->28도로 계속 커짐 - 실측 확인).
-# 그래서 "이전 목표에 실제로 도달(정지) 확인 후에만" 새로 계산하도록 게이트를 추가한다 -
-# contact_planner_node의 tip 정지-게이팅(_tip_is_settled)과 같은 발상.
-#
-# 2026-09-15 실측: 5mm/1.0도는 이 자세에서 MIT 저수준 PD 추종의 실측 잔차(약 27.7mm/3.8도 -
-# gpr_robot/CLAUDE.md에 문서화된 "MIT는 완벽히 도달 보장 없음" 현상, 이번엔 이 자세의 중력
-# 부하 때문에 평소(약 1.85도)보다 더 크게 남음)보다 타이트해서, 도달 판정이 영원히 안 되고
-# 다음 보정 계산 자체가 멈춰버렸다(모서리 퍼짐이 24.7mm에서 그대로 얼어붙음, 실측 확인).
-# 실측 잔차보다 여유 있게 완화해서 다음 보정 사이클이 계속 진행되게 한다 - 그래도 초기 퍼짐
-# (76mm대)보다는 훨씬 타이트하니 여러 사이클 거치며 점진적으로 나아질 여지는 있다.
-LEVEL_ARRIVAL_POS_TOL_M = 0.04
-LEVEL_ARRIVAL_ORN_TOL_DEG = 6.0
-LEVEL_ARRIVAL_HOLD_TICKS = 3
+# 2026-09-15 실측 사고 대응 + 재설계 이력: 처음엔 "판 전체를 피벗 기준으로 회전시키는 Cartesian
+# 목표"를 계산해서 6축 IK에 통째로 맡겼는데(_quat_between 기반 강체회전), 이게 계속 문제였다 -
+# 전체 보정을 한 번에 실행하면 피벗/roll 가정이 조금만 어긋나도 그대로 발산했고, 감쇠 스텝
+# (전체의 30%)으로 나눠도 "정지 확인 없이 매 tick 재계산"하면 MIT 정상상태 오차(2~4도)가 스텝
+# 크기보다 커서 잡음을 신호로 착각해 오히려 더 심하게 발산했다(3.9->5.8->6.3cm). 근본적으로
+# 6축 전체를 매번 다시 푸는 게 과했다 - 이 보정은 사실 "손목만 살짝 트는" 정도의 작은 자세
+# 조정이라, joint1/2/3/6은 그대로 두고 **손목 관절 joint4/5 두 개만** 국소적으로 조정하는
+# 방식으로 재설계한다(사용자 제안):
+#   1) /joint_states로 현재 6개 관절각을 그대로 받아온다(joint1~3/6은 절대 안 건드림).
+#   2) 4개 모서리가 link6에 대해 갖는 고정 상대위치(_capture_corner_offsets, CAPTURE와 같은
+#      발상)를 한 번 캡처해둔다.
+#   3) joint4/5 후보 델타 조합을 순수 FK(시뮬레이션, 로봇 안 움직임)로 미리 평가해서 "모서리
+#      퍼짐"을 가장 줄이는 조합을 grid search로 찾는다 - 실제 로봇을 움직여보지 않고도 결과를
+#      예측할 수 있어서 빠르고 안전하다.
+#   4) 그렇게 찾은 (joint4,joint5)만 바뀐 새 관절각의 FK로 link6 목표 pose를 만들어 발행한다 -
+#      나머지 4개 관절은 요청값이 지금 값과 완전히 같으므로, 6축 IK든 뭐든 이 목표는 "지금
+#      자세 바로 옆"이라 항상 쉽게(그리고 항상 같은 분기로) 수렴한다. 큰 점프/roll 자유도/
+#      시드 탐색/도달범위 문제가 전부 원천적으로 없어진다.
+# 정지-게이팅(_link6_is_settled)은 그대로 유지 - 이전 스텝이 실제로 끝난 뒤에만 다음 손목
+# 조정을 계산해서, 잡음 낀 상태를 기준으로 또 계산하는 일을 막는다.
+WRIST_JOINT_INDICES = (3, 4)  # 0-based: joint4, joint5
+WRIST_SEARCH_STEP_DEG = 1.0  # grid 간격
+WRIST_MAX_DELTA_DEG = 4.0  # 한 번의 조정에서 joint4/5 각각 허용하는 최대 변화량(안전 상한) -
+# grid 자체가 이 범위 안에서만 후보를 만드므로 별도의 감쇠(alpha)가 필요 없다.
 
-
-def _approach_axis_angle_diff_deg(qa, qb):
-    """두 쿼터니언의 로컬 Z축(접근/법선 방향) 사이의 각도차(도) - 그 축 둘레 회전(roll)은
-    무시한다. LEVEL 도달-게이팅(_level_arrival_hold)용.
-
-    2026-09-15: 원래는 두 쿼터니언 전체(roll 포함) 회전각차를 봤는데, piper_controller_node가
-    같은 날 도입한 "roll은 관절 여유가 좋은 쪽으로 자유롭게 고른다"(IK가 접근축만 구속하고
-    roll은 태스크상 자유도라는 조사 결과)와 앞뒤를 맞추기 위해 여기서도 roll 차이는 무시하도록
-    바꿨다 - 안 그러면 piper_controller_node가 고른 roll이 이 노드가 요청한 roll과 달라서
-    "정확히 그 자세"에는 영원히 도달 못 해 LEVEL이 영구히 얼어붙는 문제가 생긴다(실측 확인:
-    모서리 퍼짐이 27.5mm -> 176.8mm까지 벌어졌다가 52mm에서 멈추고 다시는 안 줄어듦). 물리적으로도
-    판이 벽에 평행하게만 붙으면 되니 roll은 원래 이 판정에 무관해야 맞다."""
-    za = np.array(p.getMatrixFromQuaternion(qa)).reshape(3, 3)[:, 2]
-    zb = np.array(p.getMatrixFromQuaternion(qb)).reshape(3, 3)[:, 2]
-    cos_a = float(np.clip(np.dot(za, zb), -1.0, 1.0))
-    return math.degrees(math.acos(cos_a))
+LEVEL_SETTLE_WINDOW = 4  # 최근 이 틱(각 PUSH_STEP_PERIOD_S=0.5초) 동안 안 움직였는지 확인 (~2초)
+LEVEL_SETTLE_POS_TOL_M = 0.003
+LEVEL_SETTLE_ANGLE_TOL_DEG = 1.0
 
 
-def _quat_between(a: np.ndarray, b: np.ndarray):
-    """단위벡터 a를 b로 돌리는 최단회전 쿼터니언(x,y,z,w) - contact_planner_node의
-    quat_from_z_axis(고정된 [0,0,1]에서 시작)를 임의의 시작 벡터로 일반화한 버전
-    (2026-09-15, LEVEL 보정 회전 계산용)."""
-    a = a / np.linalg.norm(a)
-    b = b / np.linalg.norm(b)
-    dot = float(np.dot(a, b))
-    if dot < -0.999999:  # 거의 180도 - 축이 정해지지 않으니 임의의 수직축 사용
-        ortho = np.cross(a, [1.0, 0.0, 0.0])
-        if np.linalg.norm(ortho) < 1e-6:
-            ortho = np.cross(a, [0.0, 1.0, 0.0])
-        ortho /= np.linalg.norm(ortho)
-        return (float(ortho[0]), float(ortho[1]), float(ortho[2]), 0.0)
-    cross = np.cross(a, b)
-    q = np.array([cross[0], cross[1], cross[2], 1.0 + dot])
-    q /= np.linalg.norm(q)
-    return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+def _full_quat_angle_diff_deg(qa, qb):
+    """두 쿼터니언 사이의 전체 회전 각도차(도, roll 포함) - `_link6_is_settled()`가 "실제로
+    멈췄는지"(모든 자유도가 안정됐는지) 판정할 때만 쓴다. 목표와의 도달 비교가 아니라 연속
+    TF 샘플끼리의 비교라 roll 자유도 문제(piper_controller_node의 roll 자동 선택)와 무관하다."""
+    inv_a = (-qa[0], -qa[1], -qa[2], qa[3])
+    _, q_rel = p.multiplyTransforms([0, 0, 0], inv_a, [0, 0, 0], qb)
+    w = max(-1.0, min(1.0, abs(q_rel[3])))
+    return math.degrees(2 * math.acos(w))
+
+
+def tip_pose(ik_robot, joint_indices, deg6):
+    """순수 FK(시뮬레이션만, 로봇 안 움직임) - deg6(6개, 도) 관절각에서 link6의 base_link 기준
+    pos/orn을 계산한다. piper_controller_node.tip_pose()와 동일한 패턴(별도 프로세스라 직접
+    import 대신 로컬에 둠)."""
+    for idx, d in zip(joint_indices, deg6):
+        p.resetJointState(ik_robot, idx, math.radians(d))
+    return p.getLinkState(ik_robot, TIP_LINK_INDEX, computeForwardKinematics=True)[4:6]
 
 
 class PushForwardNode(Node):
@@ -175,6 +183,11 @@ class PushForwardNode(Node):
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        self.ik_robot, self.joint_indices = load_ik_model()  # 순수 FK 예측용(로봇 안 움직임) -
+        # WRIST_JOINT_INDICES(joint4/5) grid search에서 씀.
+        self.current_joint_deg = None  # /joint_states 최신값(도, joint1~6 순서) - wrist 보정의 기준
+        self._corner_offsets_link6 = None  # {corner명: link6 로컬 프레임 기준 위치} - 한 번만 캡처
 
         self.state = STATE_IDLE
         self.plate_pos0 = None  # CAPTURE 시점 T^{base}_{plate} 위치 (고정)
@@ -189,13 +202,16 @@ class PushForwardNode(Node):
         # 2026-09-15 LEVEL 단계용 상태 (모듈 docstring 참고).
         self._wall_centroid = None  # contact_planner_node가 LOCK한 벽 평면 중심
         self._wall_normal = None    # 같은 평면 법선("벽->tip" 방향, contact_planner_node와 동일 부호)
-        self._level_target_pos = None
+        self._level_target_pos = None  # 정지 확인 후 재계산되는 감쇠 스텝의 최신 결과(퍼블리시용)
         self._level_target_orn = None
         self._level_hold_count = 0
-        self._level_arrival_hold = 0  # 현재 _level_target_*에 실제로 도달한 연속 tick 수
+        self._link6_pose_history = deque(maxlen=LEVEL_SETTLE_WINDOW)  # (pos, orn) - 다음 감쇠
+        # 스텝을 계산할 타이밍 게이팅용(_link6_is_settled)
         self.wall_plane_sub = self.create_subscription(
             PoseStamped, "/piper/locked_wall_plane", self._on_wall_plane,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.joint_state_sub = self.create_subscription(
+            JointState, "/joint_states", self._on_joint_states, 10)
 
         self.contact_image_sub = self.create_subscription(
             Image, CONTACT_IMAGE_TOPIC, self._on_contact_image, 10)
@@ -237,6 +253,16 @@ class PushForwardNode(Node):
             invalid |= np.all(arr == color, axis=1)
         self._contact_invalid_fraction = float(np.mean(invalid))
 
+    def _on_joint_states(self, msg: JointState):
+        """실제 CAN 피드백 기반 관절각(도) - wrist-only 보정(joint4/5 grid search)의 기준
+        상태로 쓴다. 이름으로 매칭해서 JOINT_NAMES(joint1~6) 순서로 저장 - 발행자가
+        piper_controller_node든 piper_joint_state_bridge든(2026-09-15 실측: 컨트롤러가 안
+        떠 있으면 후자가 파일 기반 스냅샷을 대신 냄) 이름만 맞으면 상관없다."""
+        by_name = dict(zip(msg.name, msg.position))
+        if not all(name in by_name for name in JOINT_NAMES):
+            return
+        self.current_joint_deg = [math.degrees(by_name[name]) for name in JOINT_NAMES]
+
     def _on_wall_plane(self, msg: PoseStamped):
         """contact_planner_node가 LOCK 시(TRANSIENT_LOCAL이라 이 노드가 나중에 떠도 마지막
         값을 받음) 발행하는 벽 평면. orientation의 로컬 +Z를 돌리면 법선이 나온다(그쪽에서
@@ -275,64 +301,106 @@ class PushForwardNode(Node):
         return {name: float(np.dot(pos - self._wall_centroid, self._wall_normal))
                 for name, pos in corner_positions.items()}
 
+    def _capture_corner_offsets(self) -> bool:
+        """4개 모서리가 link6에 대해 갖는 고정 상대위치(로컬 프레임)를 한 번 캡처한다 - 전부
+        같은 강체(마운트 판)에 붙어있으니 이후 관절이 어떻게 움직여도 이 상대위치는 안 변한다.
+        _predicted_corner_positions()가 순수 FK 예측에 쓴다. 실패하면 False(다음 tick 재시도)."""
+        link6 = self._lookup(BASE_FRAME, LINK6_FRAME)
+        left = self._lookup(LINK6_FRAME, NORMAL_LEFT_FRAME)
+        right = self._lookup(LINK6_FRAME, NORMAL_RIGHT_FRAME)
+        ext_left = self._lookup(LINK6_FRAME, NORMAL_EXT_LEFT_FRAME)
+        ext_right = self._lookup(LINK6_FRAME, NORMAL_EXT_RIGHT_FRAME)
+        if any(v is None for v in (link6, left, right, ext_left, ext_right)):
+            return False
+        self._corner_offsets_link6 = {
+            "wall_left": left[0], "wall_right": right[0],
+            "extension_wall_left": ext_left[0], "extension_wall_right": ext_right[0],
+        }
+        return True
+
+    def _predicted_corner_positions(self, deg6):
+        """deg6(6개 관절각, 도) 순수 FK로 4개 모서리의 base_link 기준 위치를 예측한다(로봇 안
+        움직임) - _corner_offsets_link6(고정 상대위치)를 그 FK의 link6 pose에 적용."""
+        link6_pos, link6_orn = tip_pose(self.ik_robot, self.joint_indices, deg6)
+        rot = np.array(p.getMatrixFromQuaternion(link6_orn)).reshape(3, 3)
+        return {name: np.array(link6_pos) + rot @ offset
+                for name, offset in self._corner_offsets_link6.items()}
+
+    def _predicted_spread(self, deg6) -> float:
+        """deg6에서 예측되는 4개 모서리의 벽까지 거리 퍼짐(최대-최소, m) - 작을수록 평평함."""
+        corners = self._predicted_corner_positions(deg6)
+        distances = self._corner_wall_distances(corners)
+        return max(distances.values()) - min(distances.values())
+
     def _compute_level_target(self):
-        """LEVEL 목표(link6 pos/orn) 계산 - 모듈 docstring의 LEVEL 단계 설명 참고. 4개 모서리
-        중 벽에서 가장 먼 걸 피벗으로 고정하고, 판의 현재 법선을 벽 법선과 정확히 반대
-        방향으로 맞추는 최단회전을 그 피벗 기준으로 적용한다. 실패(TF/벽 평면 없음, 보정각
-        과다)하면 None."""
+        """LEVEL 목표(link6 pos/orn) 계산 - 2026-09-15 재설계(모듈 상단 설명 참고). joint1/2/3/6은
+        지금 값 그대로 두고, joint4/5 두 개만 조합을 바꿔가며 순수 FK로 "모서리 퍼짐"이 가장
+        작아지는 조합을 찾는다(grid search, 로봇 안 움직임 - WRIST_SEARCH_STEP_DEG 간격으로
+        ±WRIST_MAX_DELTA_DEG 범위). 찾은 조합의 FK로 link6 목표 pose를 만들어 리턴 - 나머지
+        4개 관절은 요청값이 지금과 완전히 같으므로 IK가 항상 지금 자세 바로 옆으로만 수렴한다.
+        실패(TF/벽 평면/관절상태 없음, 개선되는 조합 없음)하면 None."""
         if self._wall_centroid is None or self._wall_normal is None:
             return None
-        corners = self._corner_positions()
-        if corners is None:
+        if self.current_joint_deg is None:
             return None
-        link6 = self._lookup(BASE_FRAME, LINK6_FRAME)
-        if link6 is None:
+        if self._corner_offsets_link6 is None and not self._capture_corner_offsets():
             return None
-        link6_pos, link6_orn = link6
 
-        # 현재 판 법선 - _try_capture()의 push_dir 계산과 동일한 방식(CAPTURE 전이라 아직
-        # self.push_dir이 없어서 여기서 독립적으로 다시 구함).
-        corner_arr = np.stack([corners["wall_left"], corners["wall_right"],
-                                corners["extension_wall_left"], corners["extension_wall_right"]])
-        corner_centroid = corner_arr.mean(axis=0)
-        _, _, vh = np.linalg.svd(corner_arr - corner_centroid, full_matrices=False)
-        current_normal = vh[-1]
-        current_normal /= np.linalg.norm(current_normal)
-        rot_link6 = np.array(p.getMatrixFromQuaternion(link6_orn)).reshape(3, 3)
-        if np.dot(current_normal, rot_link6[:, 2]) < 0:
-            current_normal = -current_normal
+        baseline_deg6 = list(self.current_joint_deg)
+        baseline_spread = self._predicted_spread(baseline_deg6)
 
-        distances = self._corner_wall_distances(corners)
-        pivot_name = max(distances, key=distances.get)
-        pivot_pos = corners[pivot_name]
+        deltas = np.arange(-WRIST_MAX_DELTA_DEG, WRIST_MAX_DELTA_DEG + 1e-6, WRIST_SEARCH_STEP_DEG)
+        j4_idx, j5_idx = WRIST_JOINT_INDICES
+        j4_lo, j4_hi = math.degrees(IK_LOWER[j4_idx]), math.degrees(IK_UPPER[j4_idx])
+        j5_lo, j5_hi = math.degrees(IK_LOWER[j5_idx]), math.degrees(IK_UPPER[j5_idx])
 
-        target_normal = -self._wall_normal  # push_dir이 최종적으로 향해야 할 방향("벽 쪽")
-        correction_orn = _quat_between(current_normal, target_normal)
-        correction_angle_deg = math.degrees(2 * math.acos(min(1.0, max(-1.0, correction_orn[3]))))
-        if correction_angle_deg > LEVEL_MAX_CORRECTION_DEG:
-            self.get_logger().error(
-                f"LEVEL 보정각({correction_angle_deg:.1f}도)이 안전 상한"
-                f"({LEVEL_MAX_CORRECTION_DEG}도)을 넘음 - 벽 평면 데이터 이상 의심. LEVEL 취소."
+        best_spread, best_deg6 = baseline_spread, None
+        for d4 in deltas:
+            j4 = baseline_deg6[j4_idx] + d4
+            if not (j4_lo <= j4 <= j4_hi):
+                continue
+            for d5 in deltas:
+                j5 = baseline_deg6[j5_idx] + d5
+                if not (j5_lo <= j5 <= j5_hi):
+                    continue
+                candidate = list(baseline_deg6)
+                candidate[j4_idx], candidate[j5_idx] = j4, j5
+                spread = self._predicted_spread(candidate)
+                if spread < best_spread:
+                    best_spread, best_deg6 = spread, candidate
+
+        if best_deg6 is None:
+            self.get_logger().warn(
+                f"LEVEL: joint4/5를 ±{WRIST_MAX_DELTA_DEG:.0f}도 범위에서 훑어봐도 지금보다 "
+                f"나은 조합을 못 찾음(현재 예측 퍼짐 {baseline_spread*1000:.1f}mm) - 이번 tick은 "
+                "그대로 유지.",
+                throttle_duration_sec=2.0,
             )
             return None
 
-        # 위치: link6의 "피벗 기준 상대 위치"만 correction_orn으로 회전시키고 피벗을 다시 더함
-        # (피벗 자체는 고정) - p.multiplyTransforms([0,0,0], q, v, identity) = (R(q)@v, q).
-        rotated_offset, _ = p.multiplyTransforms(
-            [0.0, 0.0, 0.0], correction_orn,
-            (np.array(link6_pos) - pivot_pos).tolist(), [0.0, 0.0, 0.0, 1.0],
-        )
-        new_link6_pos = pivot_pos + np.array(rotated_offset)
-        # 자세: correction_orn을 world(base_link) 프레임 기준으로 현재 자세 위에 합성.
-        _, new_link6_orn = p.multiplyTransforms(
-            [0.0, 0.0, 0.0], correction_orn, [0.0, 0.0, 0.0], link6_orn)
-
+        new_link6_pos, new_link6_orn = tip_pose(self.ik_robot, self.joint_indices, best_deg6)
         self.get_logger().warn(
-            f"LEVEL 목표 계산: 피벗={pivot_name}(거리 {distances[pivot_name]*100:.1f}cm), "
-            f"보정각={correction_angle_deg:.1f}도, 나머지 모서리 거리="
-            f"{ {k: round(v*100,1) for k, v in distances.items()} }"
+            f"LEVEL 손목(joint4/5) 보정 계산(정지 확인 후): joint4 {baseline_deg6[j4_idx]:+.1f}"
+            f"->{best_deg6[j4_idx]:+.1f}도, joint5 {baseline_deg6[j5_idx]:+.1f}->"
+            f"{best_deg6[j5_idx]:+.1f}도, 예측 퍼짐 {baseline_spread*1000:.1f}mm->"
+            f"{best_spread*1000:.1f}mm"
         )
-        return new_link6_pos, new_link6_orn
+        return np.array(new_link6_pos), new_link6_orn
+
+    def _link6_is_settled(self) -> bool:
+        """최근 LEVEL_SETTLE_WINDOW틱 동안 link6의 실제 TF 위치/방향이 거의 안 변했으면 True -
+        "목표에 도달했는가"가 아니라 "직전 감쇠 스텝이 끝나고 실제로 멈췄는가"만 본다(모듈
+        상단 LEVEL_SETTLE_* 설명 참고, contact_planner_node의 _tip_is_settled와 동일한 발상)."""
+        if len(self._link6_pose_history) < LEVEL_SETTLE_WINDOW:
+            return False
+        positions = np.array([pos for pos, _ in self._link6_pose_history])
+        pos_spread = float(np.max(np.linalg.norm(positions - positions.mean(axis=0), axis=1)))
+        if pos_spread >= LEVEL_SETTLE_POS_TOL_M:
+            return False
+        quats = [orn for _, orn in self._link6_pose_history]
+        ref = quats[0]
+        angle_spread = max(_full_quat_angle_diff_deg(ref, q) for q in quats[1:])
+        return angle_spread < LEVEL_SETTLE_ANGLE_TOL_DEG
 
     def _log_milestone(self, msg: str):
         """FSM 상태 전환(정렬 시작/완료, 이동 시작/완료)처럼 한눈에 딱 보여야 하는 이정표를
@@ -413,9 +481,9 @@ class PushForwardNode(Node):
                     "했는지 확인) ...", throttle_duration_sec=2.0)
                 return
             self._level_hold_count = 0
-            self._level_arrival_hold = 0
             self._level_target_pos = None
             self._level_target_orn = None
+            self._link6_pose_history.clear()
             self.state = STATE_LEVEL
             self._log_milestone("정렬(LEVEL) 시작 - 판을 벽과 평행하게 맞추는 중")
 
@@ -442,36 +510,22 @@ class PushForwardNode(Node):
                             "정렬 완료 - ENABLE_PUSH=False라 이동 없이 이 자세를 유지합니다(HOLD)")
 
             if self.state == STATE_LEVEL:  # 아직 안 끝났으면
-                # 2026-09-15: 최초엔 LEVEL 진입 시점에 딱 한 번만 목표를 계산해서 계속
-                # 재발행했는데(open-loop), 한 번의 보정만으론 다 못 맞고(퍼짐이 17mm 근처에서
-                # 안 줄어들고 멈춤) 남는 잔차가 있어서 "매 tick 재계산"으로 바꿨었다가, 그게
-                # 오히려 발산하는 사고가 실측으로 확인됐다(팔이 이전 목표에 도달하기도 전에
-                # "아직 안정 안 된 지금 이 순간"을 새 기준으로 또 완전한 보정을 계산 -> 피벗이
-                # 매 tick 밀려나며 보정이 계속 쌓이는 양성 피드백, extension_wall_right 거리가
-                # 4.5->9.9cm로 계속 커짐). 그래서 **이전 목표에 실제로 도달(정지) 확인된
-                # 뒤에만** 새로 계산하도록 게이트를 추가한다(LEVEL_ARRIVAL_* 설명 참고) -
-                # 도달 전에는 이미 계산해둔 목표를 그대로 재발행만 한다.
+                # 2026-09-15 재설계(모듈 상단 WRIST_*/LEVEL_SETTLE_* 설명 참고): joint4/5 grid
+                # search와 정지-게이팅을 같이 쓴다 - 실제로 멈춘 게 확인된 뒤에만 다음 손목 보정을
+                # 계산하고, 그전까지는 이미 계산해둔 목표를 그대로 재발행한다.
+                link6 = self._lookup(BASE_FRAME, LINK6_FRAME)
+                if link6 is not None:
+                    self._link6_pose_history.append((link6[0].copy(), link6[1]))
+
                 need_new_target = self._level_target_pos is None
-                if not need_new_target:
-                    link6 = self._lookup(BASE_FRAME, LINK6_FRAME)
-                    if link6 is not None:
-                        link6_pos, link6_orn = link6
-                        pos_err = math.dist(link6_pos, self._level_target_pos)
-                        orn_err_deg = _approach_axis_angle_diff_deg(link6_orn, self._level_target_orn)
-                        if (pos_err < LEVEL_ARRIVAL_POS_TOL_M
-                                and orn_err_deg < LEVEL_ARRIVAL_ORN_TOL_DEG):
-                            self._level_arrival_hold += 1
-                        else:
-                            self._level_arrival_hold = 0
-                        if self._level_arrival_hold >= LEVEL_ARRIVAL_HOLD_TICKS:
-                            need_new_target = True
+                if not need_new_target and self._link6_is_settled():
+                    need_new_target = True
 
                 if need_new_target:
                     level_target = self._compute_level_target()
                     if level_target is not None:
                         self._level_target_pos, self._level_target_orn = level_target
-                        self._level_arrival_hold = 0
-                        self.get_logger().warn("LEVEL 목표 갱신(이전 목표 도달 확인 후 재계산).")
+                        self._link6_pose_history.clear()  # 새 스텝 시작 - 다시 정지 확인부터
                     elif self._level_target_pos is None:
                         return  # 최초 계산도 아직 안 됨(TF 문제 등) - 다음 tick 재시도
 
