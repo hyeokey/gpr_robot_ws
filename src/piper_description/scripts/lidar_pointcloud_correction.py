@@ -27,7 +27,18 @@ piper_with_lidar.urdf의 lidar_1_optical_frame 주석 참고). 부호는 가정�
 2026-09-10: 드라이버가 무효 픽셀(범위 밖/저신호 등)을 (0,0,0)으로 채우는데(Topic3D.cpp), 예전
 버전은 이 자리에까지 보정을 그대로 더해서 "실제로 있는 것처럼 보이는" 가짜 점(정확히 (dx,dy,dz)
 위치)이 생기는 버그가 있었다(실측 중 발견 - 각도 0/0 근처에서 이 가짜 점이 진짜 최근접점으로
-잡혔음). 이제 (0,0,0)인 원본 점은 보정하지 않고 그대로 둔다."""
+잡혔음). 이제 (0,0,0)인 원본 점은 보정하지 않고 그대로 둔다.
+
+2026-09-15: lidar_1/lidar_2 둘 다 raw 포인트클라우드 자체에 프레임 간 노이즈가 있는 것으로
+확인되어(같은 자리 반복 측정해도 cm 단위로 튐), 픽셀별 시간축 저역통과필터(EMA)를 추가했다.
+CygLiDAR가 매 프레임 같은 해상도의 고정 격자로 나오므로(Topic3D.cpp) 같은 인덱스가 항상 같은
+각도를 가리킨다는 점을 이용 - contact_planner_node의 NORMAL_SMOOTHING_ALPHA(평면 법선에 거는
+EMA)와 같은 방식을 raw 좌표 자체에 건다. lpf_alpha가 1.0이면 필터링 안 함(통과), 작을수록
+더 부드러워지는 대신 반응이 느려짐 - contact_planner_node의 tip 정지-게이팅(TIP_SETTLE_WINDOW)
+과 겹쳐서 과도하게 느려지지 않게 너무 작은 값은 피할 것. 무효 픽셀((0,0,0))은 이번 프레임
+출력에서도 무효로 그대로 두고(필터 상태 갱신도 안 함 - 다음에 다시 유효해지면 마지막으로
+유효했던 값부터 이어서 블렌딩), dx/dy/dz 보정 이후 단계에 적용한다(상수 오프셋이라 순서
+무관하지만 가독성상 보정 다음에 둠)."""
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -59,6 +70,7 @@ class LidarPointCloudCorrection(Node):
         self.declare_parameter("dx", 0.0)
         self.declare_parameter("dy", 0.0)
         self.declare_parameter("dz", 0.0)
+        self.declare_parameter("lpf_alpha", 1.0)  # 1.0=필터 없음(그대로 통과), 작을수록 더 부드러움
 
         input_topic = self.get_parameter("input_topic").value
         output_topic = self.get_parameter("output_topic").value
@@ -67,22 +79,38 @@ class LidarPointCloudCorrection(Node):
         self.sub = self.create_subscription(
             PointCloud2, input_topic, self._on_cloud, qos_profile_sensor_data)
 
+        self._filtered = None  # 픽셀별 EMA 상태(구조화 배열) - 해상도 바뀌면(드라이버 재시작 등) 새로 초기화
+
     def _on_cloud(self, msg: PointCloud2):
         dx = self.get_parameter("dx").value
         dy = self.get_parameter("dy").value
         dz = self.get_parameter("dz").value
+        lpf_alpha = self.get_parameter("lpf_alpha").value
 
         points = np.frombuffer(msg.data, dtype=_struct_dtype(msg)).copy()
+        valid = (points["x"] != 0) | (points["y"] != 0) | (points["z"] != 0)
         if dx or dy or dz:
             # 드라이버가 무효 픽셀을 (0,0,0)으로 채우므로 그 자리는 보정하지 않는다 -
             # 안 그러면 (dx,dy,dz) 위치에 가짜 점이 생김.
-            valid = (points["x"] != 0) | (points["y"] != 0) | (points["z"] != 0)
             if dx:
                 points["x"][valid] += dx
             if dy:
                 points["y"][valid] += dy
             if dz:
                 points["z"][valid] += dz
+
+        if lpf_alpha < 1.0:
+            # 2026-09-15: 픽셀별 시간축 EMA(모듈 docstring 참고) - 무효 픽셀은 필터 상태를
+            # 그대로 얼려두고(다음에 유효해지면 마지막 유효값부터 이어서 블렌딩) 이번 프레임
+            # 출력에서도 무효로 남긴다(값을 만들어내지 않음).
+            if self._filtered is None or self._filtered.shape != points.shape:
+                self._filtered = points.copy()
+            for field in ("x", "y", "z"):
+                self._filtered[field][valid] = (
+                    lpf_alpha * points[field][valid]
+                    + (1.0 - lpf_alpha) * self._filtered[field][valid]
+                )
+                points[field][valid] = self._filtered[field][valid]
 
         out = PointCloud2()
         out.header = msg.header

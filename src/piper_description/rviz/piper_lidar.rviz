@@ -6,7 +6,6 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /TF1/Frames1
       Splitter Ratio: 0.5941176414489746
     Tree Height: 771
   - Class: rviz_common/Selection
@@ -62,11 +61,11 @@ Visualization Manager:
         lidar_1_link:
           Value: true
         lidar_1_optical_frame:
-          Value: false
+          Value: true
         lidar_2_link:
           Value: true
         lidar_2_optical_frame:
-          Value: false
+          Value: true
         link1:
           Value: true
         link2:
@@ -384,25 +383,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.446044683456421
+      Distance: 0.8914095759391785
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.48735761642456055
-        Y: 0.7065733671188354
-        Z: 0.7158313393592834
+        X: -0.12932784855365753
+        Y: 0.08147786557674408
+        Z: 0.2482062578201294
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.1497972160577774
+      Pitch: 0.26979753375053406
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.221346378326416
+      Yaw: 3.201340675354004
     Saved: ~
 Window Geometry:
   Displays:

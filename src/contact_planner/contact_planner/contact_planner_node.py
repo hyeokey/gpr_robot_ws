@@ -111,6 +111,7 @@ import tf2_ros
 from geometry_msgs.msg import Point, PoseStamped
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from sensor_msgs.msg import Image, PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -189,19 +190,17 @@ LOCK_ON_FIRST_VALID_FRAME = True
 # 유효한 LOCK_MEDIAN_FRAMES개 프레임을 모아서 (조인트별) 중앙값을 내고 그걸로 LOCK한다.
 LOCK_MEDIAN_FRAMES = 5
 
-ALIGN_STANDOFF_M = 0.03  # LiDAR가 확실히 보이는 정렬 거리 - 실험값. LiDAR가 무반사로 죽기
+ALIGN_STANDOFF_M = 0.06  # LiDAR가 확실히 보이는 정렬 거리 - 실험값. LiDAR가 무반사로 죽기
 # 시작하는 거리보다 5~10cm 여유를 두고 재조정할 것 (2026-09-10 진단 스크립트로 확인 가능).
 # 2026-09-11: 20cm -> 15cm로 낮췄다가, 정렬 자체가 불안정한 게 확인되어(로그 참고) 다시 20cm로.
 # 2026-09-11 재시도: push_forward_node 테스트 중 20cm 지점 자세가 손목 특이점 근처(J5가
 # tick마다 계속 더 크게 튀는 걸로 실측 확인, piper_controller_node "새 목표" 로그의 관절별
 # 델타 참고)로 보여서, 다른 접근 거리에서도 재현되는지 보려고 15cm -> 10cm -> 3cm로 낮춰가며
-# 확인 중 - 이전에 "불안정하다"고 판단했던 게 정확히 무엇이었는지(평면 검출 자체의 노이즈였는지,
-# 이 특이점 문제였는지) 로그로 구분해서 볼 것. ⚠️ 3cm는 MIN_VALID_DIST_M(0.1m) 필터보다도
-# 가깝고 FINAL_STANDOFF_M(3cm)과 사실상 같은 거리 - LiDAR가 무반사로 죽어서 평면 검출 자체가
-# 흔들릴 가능성이 매우 높음(ALIGN은 매 프레임 평면을 다시 계산해 목표를 계속 갱신하는 단계라
-# FINAL_APPROACH보다 이 문제에 더 취약함). 손목 특이점 재현 여부를 다른 거리에서 확인하려는
-# 목적의 실험값 - 평면 검출 실패/불안정 로그가 뜨면 그건 특이점과 무관하게 이 거리 자체가
-# 원인이니 바로 되돌릴 것.
+# 확인 중이었다. ⚠️ 3cm는 MIN_VALID_DIST_M(0.1m) 필터보다도 가깝고 FINAL_STANDOFF_M(3cm)과
+# 사실상 같은 거리라 LiDAR 평면 검출 자체가 불안정할 위험이 있었고, 실제로 그 근처에서 IK가
+# 계속 실패하며 목표가 발산하는 현상이 실측됨(joint1이 소프트 한계까지 밀림 - 2026-09-15
+# 안전 조사 참고). 3cm는 너무 공격적이었다고 보고 6cm로 한 단계 올림 - 여전히 20cm대보다는
+# 훨씬 가깝지만 MIN_VALID_DIST_M보다는 확실히 떨어져 있음. 재현되면 계속 올릴 것.
 FINAL_STANDOFF_M = 0.03  # 최종 접근 거리 - 기존 PRE_CONTACT_OFFSET_M 튜닝값(1->3->5->7->6cm) 승계 후 3cm로 재조정.
 FINAL_APPROACH_STEP_M = 0.005  # LOCK 이후 tick마다 standoff를 줄이는 양(0.5cm)
 FINAL_APPROACH_STEP_PERIOD_S = 0.5  # 그 tick 주기(초) - LiDAR 피드백 없는 구간이라 보수적으로 느리게
@@ -215,6 +214,12 @@ STABLE_ANGLE_TOL_DEG = 2.0  # 법선 방향이 이 이상 안 흔들려야 안�
 # RANSAC이 잘못 잡은 것으로 보고 버린다. 가안 35도 - 마운트/캘리브레이션 오차 여유는 두되
 # 천장(거의 90도)은 확실히 걸러지는 값.
 MAX_NORMAL_TILT_FROM_HORIZONTAL_DEG = 35.0
+
+# 2026-09-14: RViz 디버그용 화살표 마커(평면 법선, link6 +Z) 길이 - _publish_markers 참고.
+NORMAL_ARROW_LENGTH_M = 0.20
+# link6에 붙는 디버그 마커(+Z 화살표, 수선) 갱신 주기 - _tip_marker_tick 설명 참고. LiDAR
+# 프레임 속도(~10~15Hz)와 무관하게 항상 최신 TF를 따라가도록 독립 타이머로 돌린다.
+TIP_MARKER_PERIOD_S = 0.1
 
 # 2026-09-11 정렬 정확도 개선 - LOCK 정지-게이팅: contact_point가 tip_pos(현재 팔 위치)에서
 # 평면으로 내린 수선의 발이라, 팔이 아직 움직이는 중에 모은 프레임은 LOCK 후보로 섞이면 안 된다
@@ -296,6 +301,50 @@ def quat_angle_diff_deg(qa, qb):
     return math.degrees(2 * math.acos(w))
 
 
+def orthonormal_basis(normal):
+    """normal에 수직인 임의의 정규직교 기저 (tangent_u, tangent_v) 반환 - tangent_u x
+    tangent_v = normal(정규화됨)인 우수(right-handed) 기저. 평면 사각형 마커의 가로/세로
+    축으로 쓴다 (2026-09-14)."""
+    normal = normal / np.linalg.norm(normal)
+    ref = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    tangent_u = np.cross(normal, ref)
+    tangent_u /= np.linalg.norm(tangent_u)
+    tangent_v = np.cross(normal, tangent_u)
+    return tangent_u, tangent_v
+
+
+def matrix_to_quat(m):
+    """3x3 회전행렬(열벡터가 회전된 x/y/z축, 우수/det=+1 가정) -> 쿼터니언(x,y,z,w).
+    표준 알고리즘(Shepperd's method) - pybullet은 쿼터니언->행렬만 제공해서(getMatrixFromQuaternion)
+    반대 방향 변환은 직접 구현 (2026-09-14, 평면 사각형 마커 orientation 계산용)."""
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0:
+        s = 0.5 / math.sqrt(trace + 1.0)
+        w = 0.25 / s
+        x = (m[2, 1] - m[1, 2]) * s
+        y = (m[0, 2] - m[2, 0]) * s
+        z = (m[1, 0] - m[0, 1]) * s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+        w = (m[2, 1] - m[1, 2]) / s
+        x = 0.25 * s
+        y = (m[0, 1] + m[1, 0]) / s
+        z = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = 2.0 * math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+        w = (m[0, 2] - m[2, 0]) / s
+        x = (m[0, 1] + m[1, 0]) / s
+        y = 0.25 * s
+        z = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+        w = (m[1, 0] - m[0, 1]) / s
+        x = (m[0, 2] + m[2, 0]) / s
+        y = (m[1, 2] + m[2, 1]) / s
+        z = 0.25 * s
+    return (float(x), float(y), float(z), float(w))
+
+
 def tf_to_pos_orn(tf_stamped):
     t = tf_stamped.transform.translation
     r = tf_stamped.transform.rotation
@@ -313,6 +362,7 @@ class ContactPlannerNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self._smoothed_normal_base = None  # 첫 유효 검출 전까지는 None (스무딩 없이 그대로 씀)
+        self._last_centroid = None  # 마지막으로 검출된 평면 중심점 - 아래 tip 전용 마커 타이머용
         self._align_target_history = deque(maxlen=ALIGN_TARGET_MEDIAN_WINDOW)
 
         # 2026-09-11 ALIGN/FINAL_APPROACH 상태머신 (모듈 docstring 참고).
@@ -347,6 +397,13 @@ class ContactPlannerNode(Node):
 
         self.target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
         self.marker_pub = self.create_publisher(MarkerArray, "/contact_markers", 10)
+        # 2026-09-15: LOCK된 벽 평면(중심+법선)을 push_forward_node의 레벨링 보정용으로 발행.
+        # push_forward_node는 이 노드가 LOCK을 이미 끝낸 한참 뒤에(사용자가 수동으로) 켜지는
+        # 경우가 보통이라, 그냥 발행만 하면 늦게 구독한 쪽은 못 받는다 - TRANSIENT_LOCAL로
+        # 마지막 값을 새 구독자에게도 전달되게 한다.
+        self.locked_plane_pub = self.create_publisher(
+            PoseStamped, "/piper/locked_wall_plane",
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         # 2026-09-07: 로컬(라이다 프레임) 필터 통과 후 남은 점들을 라이다별로 그대로
         # rviz2에서 눈으로 확인할 수 있게 재발행 (원본 /lidar_N/scan_3D와 나란히 비교용).
         self.filtered_cloud_pub = {
@@ -362,6 +419,15 @@ class ContactPlannerNode(Node):
         # 대신 낸다 - state가 ALIGN이면 그냥 아무것도 안 하고 리턴하므로 평소엔 no-op.
         self.final_approach_timer = self.create_timer(
             FINAL_APPROACH_STEP_PERIOD_S, self._final_approach_tick)
+
+        # 2026-09-14: link6에 붙는 디버그 마커(현재 +Z 화살표, 평면으로의 수선)는 LiDAR 클라우드
+        # 처리 주기(_process_merged_cloud, ~라이다 프레임 속도)가 아니라 이 독립된 빠른 타이머로
+        # 갱신한다 - 그 값들에 쓰는 tip_pos가 "그 프레임을 처리한 순간의 TF 스냅샷"이라, 팔이
+        # 계속 움직이거나 클라우드 처리가 잠깐 멈추면(예: FINAL_APPROACH 전환, 프레임 드랍) 마커가
+        # 옛 위치에 멈춰서 실제 로봇 메시(항상 최신 /tf 기준)와 눈에 띄게 어긋나 보이는 문제가
+        # 있었음(사용자 실측 확인, RViz 스크린샷). link6은 100Hz로 계속 움직이니 이 타이머도
+        # 그에 맞춰 빠르게(10Hz) 최신 TF를 다시 조회한다.
+        self.tip_marker_timer = self.create_timer(TIP_MARKER_PERIOD_S, self._tip_marker_tick)
 
         self.get_logger().warn(
             "lidar_1+lidar_2 merge 구조 - RANSAC/SVD는 base_link로 합쳐진 클라우드 하나에 대해 "
@@ -582,6 +648,7 @@ class ContactPlannerNode(Node):
         # 기하학적으로 올바른 접촉점을 준다(두 패치가 같은 평면 위에 있다는 것만 확인되면 됨).
         signed_distance = float(np.dot(tip_pos - centroid, normal_base))
         contact_point = tip_pos - signed_distance * normal_base
+        self._last_centroid = centroid.copy()  # _tip_marker_tick(독립 타이머)에서 씀
 
         # ALIGN 단계 목표: 지금까지와 동일한 수선투영 접촉점 기준, 다만 물러나는 거리가
         # ALIGN_STANDOFF_M(LiDAR가 잘 보이는 먼 거리) - FINAL_STANDOFF_M은 LOCK 이후에만 쓴다.
@@ -610,7 +677,7 @@ class ContactPlannerNode(Node):
 
         self.target_pub.publish(target)
 
-        self._publish_markers(inlier_points, raw_align_target, align_target)
+        self._publish_markers(inlier_points, raw_align_target, align_target, centroid, normal_base)
 
         self.get_logger().info(
             f"[ALIGN] 평면중심 ({centroid[0]:.3f},{centroid[1]:.3f},{centroid[2]:.3f}) "
@@ -675,6 +742,19 @@ class ContactPlannerNode(Node):
                 if ENABLE_FINAL_APPROACH else
                 f"ENABLE_FINAL_APPROACH=False라 {ALIGN_STANDOFF_M*100:.0f}cm에서 그대로 유지합니다."
             )
+            plane_msg = PoseStamped()
+            plane_msg.header.stamp = self.get_clock().now().to_msg()
+            plane_msg.header.frame_id = BASE_FRAME
+            plane_msg.pose.position.x, plane_msg.pose.position.y, plane_msg.pose.position.z = (
+                float(v) for v in self.locked_contact
+            )
+            # quat_from_z_axis(locked_normal) (부호 반전 안 함, approach_orn과 다름) - 구독
+            # 쪽에서 이 쿼터니언의 로컬 +Z를 돌리면 locked_normal을 그대로 복원할 수 있게.
+            (plane_msg.pose.orientation.x, plane_msg.pose.orientation.y,
+             plane_msg.pose.orientation.z, plane_msg.pose.orientation.w) = quat_from_z_axis(
+                self.locked_normal)
+            self.locked_plane_pub.publish(plane_msg)
+
             lock_desc = (f"정지 확인 후 {LOCK_MEDIAN_FRAMES}프레임 중앙값"
                          if LOCK_ON_FIRST_VALID_FRAME else "10프레임 안정")
             self.get_logger().warn(
@@ -697,15 +777,66 @@ class ContactPlannerNode(Node):
         m.pose.orientation.w = 1.0
         m.scale.x = m.scale.y = m.scale.z = scale
         m.color.r, m.color.g, m.color.b, m.color.a = color
-        m.lifetime.sec = 1
+        m.lifetime.sec = 0  # 2026-09-14: 디버깅용 - 자동 삭제 안 하고 계속 표시(다음 프레임에서 덮어씀)
+        return m
+
+    def _arrow_marker(self, start: np.ndarray, end: np.ndarray, stamp, marker_id: int,
+                       color) -> Marker:
+        """시작점(start)->끝점(end) 화살표. Marker.ARROW를 pose 대신 points 2개로 지정하는
+        방식(쿼터니언 계산 없이 두 점만으로 방향/길이가 정해짐) - scale.x=축 굵기,
+        scale.y=머리 굵기, scale.z=머리 길이(0이면 RViz 기본 비율)."""
+        m = Marker()
+        m.header.frame_id = BASE_FRAME
+        m.header.stamp = stamp
+        m.ns = "contact_planner"
+        m.id = marker_id
+        m.type = Marker.ARROW
+        m.action = Marker.ADD
+        m.points = [
+            Point(x=float(start[0]), y=float(start[1]), z=float(start[2])),
+            Point(x=float(end[0]), y=float(end[1]), z=float(end[2])),
+        ]
+        m.pose.orientation.w = 1.0
+        m.scale.x = 0.01  # 축 굵기
+        m.scale.y = 0.02  # 머리 굵기
+        m.scale.z = 0.0   # 머리 길이 - RViz 기본값(축 길이 비례) 사용
+        m.color.r, m.color.g, m.color.b, m.color.a = color
+        m.lifetime.sec = 0  # 2026-09-14: 디버깅용 - 자동 삭제 안 하고 계속 표시(다음 프레임에서 덮어씀)
+        return m
+
+    def _line_marker(self, start: np.ndarray, end: np.ndarray, stamp, marker_id: int,
+                      color, width: float = 0.005) -> Marker:
+        """시작점-끝점을 잇는 단순 선분(LINE_LIST). scale.x만 선 굵기로 쓰임."""
+        m = Marker()
+        m.header.frame_id = BASE_FRAME
+        m.header.stamp = stamp
+        m.ns = "contact_planner"
+        m.id = marker_id
+        m.type = Marker.LINE_LIST
+        m.action = Marker.ADD
+        m.points = [
+            Point(x=float(start[0]), y=float(start[1]), z=float(start[2])),
+            Point(x=float(end[0]), y=float(end[1]), z=float(end[2])),
+        ]
+        m.pose.orientation.w = 1.0
+        m.scale.x = width
+        m.color.r, m.color.g, m.color.b, m.color.a = color
+        m.lifetime.sec = 0  # 2026-09-14: 디버깅용 - 자동 삭제 안 하고 계속 표시(다음 프레임에서 덮어씀)
         return m
 
     def _publish_markers(self, inlier_points_base: np.ndarray, raw_target_pos: np.ndarray,
-                          filtered_target_pos: np.ndarray):
+                          filtered_target_pos: np.ndarray, centroid: np.ndarray,
+                          normal_base: np.ndarray):
         """ALIGN 단계 전용. 2026-09-11(사용자 설계): 노란 점(raw_target_pos, median 필터링 전
         이번 프레임 계산값)과 빨간 점(filtered_target_pos, 실제 target_pose로 나가는 값)을
         따로 그려서, 필터가 흔들림을 실제로 눌러주고 있는지 눈으로 바로 확인할 수 있게 한다 -
-        노란 점이 튀어도 빨간 점이 안정적이면 정상."""
+        노란 점이 튀어도 빨간 점이 안정적이면 정상.
+
+        2026-09-14 추가(디버그 시각화): 검출 평면 법선(초록 화살표, id=8, 평면중심 시작)과
+        평면 자체(반투명 시안 사각형, id=11)를 같이 그린다. link6에 붙는 마커(현재 +Z 화살표,
+        평면으로의 수선)는 여기(LiDAR 프레임 주기)가 아니라 _tip_marker_tick의 독립 타이머가
+        따로 담당 - 안 그러면 팔이 움직이는 동안 마커가 옛 위치에 멈춰서 실제 로봇과 어긋나
+        보이는 문제가 있었음(사용자 실측 확인)."""
         arr = MarkerArray()
         stamp = self.get_clock().now().to_msg()
         arr.markers.append(self._sphere_marker(
@@ -728,10 +859,121 @@ class ContactPlannerNode(Node):
         plane_points_marker.scale.x = plane_points_marker.scale.y = 0.015
         plane_points_marker.color.r, plane_points_marker.color.g, \
             plane_points_marker.color.b, plane_points_marker.color.a = (0.0, 1.0, 1.0, 0.8)
-        plane_points_marker.lifetime.sec = 1
+        plane_points_marker.lifetime.sec = 0  # 2026-09-14: 디버깅용 - 계속 표시
         arr.markers.append(plane_points_marker)
 
+        # 평면 법선(초록, id=8) - 시작점=평면 중심점, 길이 NORMAL_ARROW_LENGTH_M.
+        arr.markers.append(self._arrow_marker(
+            centroid, centroid + normal_base * NORMAL_ARROW_LENGTH_M, stamp,
+            marker_id=8, color=(0.0, 1.0, 0.0, 1.0)))
+
+        # 2026-09-14: SVD로 추정한 평면 자체를 반투명 사각형(CUBE, 두께 2mm)으로 표시 - inlier
+        # 점들의 실제 분포를 normal_base에 수직인 임의의 정규직교 기저(tangent_u/tangent_v)에
+        # 투영해서 크기/중심을 잡는다(고정 크기 대신 실측 분포에 맞춤) - 위 초록 화살표(id=8)와
+        # 같은 normal_base를 쓰므로 방향은 항상 일치.
+        arr.markers.append(self._plane_quad_marker(
+            inlier_points_base, centroid, normal_base, stamp, marker_id=11))
+
         self.marker_pub.publish(arr)
+
+    def _plane_quad_marker(self, inlier_points_base: np.ndarray, centroid: np.ndarray,
+                            normal_base: np.ndarray, stamp, marker_id: int) -> Marker:
+        tangent_u, tangent_v = orthonormal_basis(normal_base)
+        rel = inlier_points_base - centroid
+        proj_u = rel @ tangent_u
+        proj_v = rel @ tangent_v
+        size_u = max(0.02, float(proj_u.max() - proj_u.min()))
+        size_v = max(0.02, float(proj_v.max() - proj_v.min()))
+        quad_center = (centroid + tangent_u * float((proj_u.min() + proj_u.max()) / 2.0)
+                       + tangent_v * float((proj_v.min() + proj_v.max()) / 2.0))
+        qx, qy, qz, qw = matrix_to_quat(np.stack([tangent_u, tangent_v, normal_base], axis=1))
+
+        m = Marker()
+        m.header.frame_id = BASE_FRAME
+        m.header.stamp = stamp
+        m.ns = "contact_planner"
+        m.id = marker_id
+        m.type = Marker.CUBE
+        m.action = Marker.ADD
+        m.pose.position.x, m.pose.position.y, m.pose.position.z = (float(v) for v in quad_center)
+        m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = (
+            qx, qy, qz, qw)
+        m.scale.x = size_u
+        m.scale.y = size_v
+        m.scale.z = 0.002  # 얇은 두께 - 시각적으로 "면"처럼 보이게
+        m.color.r, m.color.g, m.color.b, m.color.a = (0.0, 1.0, 1.0, 0.25)  # 반투명 시안
+        m.lifetime.sec = 0  # 2026-09-14: 디버깅용 - 자동 삭제 안 하고 계속 표시(다음 프레임에서 덮어씀)
+        return m
+
+    def _tip_marker_tick(self):
+        """TIP_MARKER_PERIOD_S(0.1s)마다 독립적으로 동작 - link6의 현재 +Z(전방/접근) 방향
+        화살표(파랑, id=9)와 link6 원점에서 평면으로 내린 수선(자홍, id=10)을 항상 "지금 이
+        순간"의 TF로 다시 그린다. _publish_markers(LiDAR 클라우드 처리 주기)에 얹어서 같이
+        그렸을 때는, 그 계산에 쓴 tip_pos가 "그 프레임을 처리한 순간의 TF 스냅샷"이라 팔이
+        계속 움직이거나 처리가 잠깐 멈추면(FINAL_APPROACH 전환, 프레임 드랍 등) 마커가 옛
+        위치에 멈춰서 실제 로봇 메시와 눈에 띄게 어긋나 보이는 문제가 있었음(사용자 실측
+        확인) - link6이 100Hz로 계속 움직이니 이 타이머도 그에 맞춰 독립적으로 최신 TF를
+        따라간다."""
+        tip_tf = self._lookup(BASE_FRAME, TIP_FRAME, Time())
+        if tip_tf is None:
+            return
+        tip_pos = np.array(tip_tf[0])
+        tip_z_world = np.array(p.getMatrixFromQuaternion(tip_tf[1])).reshape(3, 3)[:, 2]
+
+        arr = MarkerArray()
+        stamp = self.get_clock().now().to_msg()
+        arr.markers.append(self._arrow_marker(
+            tip_pos, tip_pos + tip_z_world * NORMAL_ARROW_LENGTH_M, stamp,
+            marker_id=9, color=(0.1, 0.4, 1.0, 1.0)))
+
+        # 수선은 평면 추정치가 있어야 그릴 수 있다 - FINAL_APPROACH 중엔 LOCK된 값(더 이상
+        # 안 바뀜), ALIGN 중엔 마지막으로 검출된(스무딩된) 평면을 기준으로 쓴다.
+        if self.state == STATE_FINAL_APPROACH and self.locked_normal is not None:
+            normal_ref, centroid_ref = self.locked_normal, self.locked_contact
+        elif self._smoothed_normal_base is not None and self._last_centroid is not None:
+            normal_ref, centroid_ref = self._smoothed_normal_base, self._last_centroid
+        else:
+            normal_ref = None
+
+        if normal_ref is not None:
+            signed_distance = float(np.dot(tip_pos - centroid_ref, normal_ref))
+            contact_point_live = tip_pos - signed_distance * normal_ref
+            arr.markers.append(self._line_marker(
+                tip_pos, contact_point_live, stamp, marker_id=10, color=(1.0, 0.0, 1.0, 1.0)))
+
+        # 2026-09-14(사용자 설계): "LOCK된 법선의 반대 방향과 실제 link6 +Z 사이 각도" -
+        # LOCK 이후 목표(locked_normal)는 더 이상 안 바뀌므로, 이 각도가 시간에 따라 0도로
+        # 잘 수렴하는지 보면 원인을 구분할 수 있다. piper_controller_node의
+        # /orientation_error_deg(명령한 목표 vs 실제 도달)와 같이 보면: 이 값(평면 기준
+        # 진짜 정답 vs 실제)이 크게 안 줄어드는데 /orientation_error_deg는 작다 -> 애초에
+        # LOCK한 목표 자체가 틀림(1단계, 목표 계산 문제). 이 값은 큰데
+        # /orientation_error_deg도 비슷하게 크다 -> 목표는 맞는데 거기 도달을 못 함(IK 한계
+        # 또는 모터/MIT 추종 문제, 2/3단계) - 그 둘을 더 좁히려면 IK 잔차나 관절별 오차를
+        # 추가로 봐야 함.
+        if self.locked_normal is not None:
+            angle_deg = vector_angle_deg(-self.locked_normal, tip_z_world)
+            text_pos = tip_pos + tip_z_world * NORMAL_ARROW_LENGTH_M + np.array([0.0, 0.0, 0.06])
+            arr.markers.append(self._text_marker(
+                f"LOCK 법선 대비 오차: {angle_deg:.1f}도", text_pos, stamp, marker_id=12))
+
+        self.marker_pub.publish(arr)
+
+    def _text_marker(self, text: str, pos: np.ndarray, stamp, marker_id: int,
+                      color=(1.0, 1.0, 1.0, 1.0), height: float = 0.04) -> Marker:
+        m = Marker()
+        m.header.frame_id = BASE_FRAME
+        m.header.stamp = stamp
+        m.ns = "contact_planner"
+        m.id = marker_id
+        m.type = Marker.TEXT_VIEW_FACING
+        m.action = Marker.ADD
+        m.text = text
+        m.pose.position.x, m.pose.position.y, m.pose.position.z = (float(v) for v in pos)
+        m.pose.orientation.w = 1.0
+        m.scale.z = height  # TEXT_VIEW_FACING은 scale.z만 씀(글자 높이)
+        m.color.r, m.color.g, m.color.b, m.color.a = color
+        m.lifetime.sec = 0
+        return m
 
     def _publish_target_marker_only(self, target_pos: np.ndarray):
         """FINAL_APPROACH 단계 전용 - LiDAR 기반 raw/filtered 구분이 의미 없음(LOCK된 값

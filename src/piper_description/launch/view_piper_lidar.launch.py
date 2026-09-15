@@ -61,9 +61,10 @@ def _lidar_node(namespace, port, frame_id, frequency_channel, run_mode=1, remapp
     )
 
 
-def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.0):
+def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.0, lpf_alpha=1.0):
     """lidar_pointcloud_correction.py를 특정 라이다용으로 띄운다 - 2026-09-10 lidar_2 전용에서
-    lidar_1도 같이 보정하도록 일반화(실측 대조 결과 lidar_1도 거리 오차가 있는 것으로 확인)."""
+    lidar_1도 같이 보정하도록 일반화(실측 대조 결과 lidar_1도 거리 오차가 있는 것으로 확인).
+    2026-09-15: lpf_alpha(픽셀별 시간축 EMA 강도) 추가 - 기본 1.0(필터 없음)."""
     return Node(
         package='piper_description',
         executable='lidar_pointcloud_correction.py',
@@ -75,6 +76,7 @@ def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.
             {'dx': dx},
             {'dy': dy},
             {'dz': dz},
+            {'lpf_alpha': lpf_alpha},
         ],
     )
 
@@ -126,8 +128,12 @@ def launch_setup(context, *args, **kwargs):
         # (lidar_1을 당기면 lidar_2가 맞춰야 할 "기준"도 같이 움직임), 한쪽만 재튜닝하지 말고
         # 항상 lidar_1/lidar_2 dx를 같이 재확인할 것 - 위치가 바뀌면 이 조합도 다시 안 맞을 수
         # 있음(실측으로 변동 확인됨).
+        # 2026-09-14: 0도(정면) 기준 실측 100.10cm를 100.00cm에 맞추려고 1mm 더 당김
+        # (-0.037 -> -0.038). 이 재조정과 세트로 lidar_2 dx도 0.1 -> 0.0으로 재설정함(아래).
+        # 2026-09-15: lpf_alpha=0.3 - 픽셀별 EMA로 프레임 간 노이즈 완화(lidar_pointcloud_correction.py
+        # docstring 참고). ros2 param set /lidar1_pointcloud_correction lpf_alpha <값>으로 재시작 없이 튜닝 가능.
         _correction_node('lidar1_pointcloud_correction',
-                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.037),
+                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.038, lpf_alpha=0.3),
     ]
 
     if len(ports) > 1:
@@ -139,8 +145,12 @@ def launch_setup(context, *args, **kwargs):
         # 맞춘 값(처음엔 0.145 -> lidar_1을 당기면서 기준이 같이 움직여 0.06 -> 재확인 후 0.1로
         # 확정) - rviz에서 겹치는 걸 보면서 `ros2 param set /lidar2_pointcloud_correction
         # dx <값>`으로 튜닝할 것(재시작 없이 바로 반영).
+        # 2026-09-14: lidar_1을 -0.038로 재조정하면서 lidar_2도 0.1 -> 0.0으로 먼저 내렸다가,
+        # 실측(사용자 직접 확인) 결과 0.0으로는 안 맞고 -0.05가 정확한 것으로 확인되어 재조정.
+        # 2026-09-15: lidar_1과 동일하게 lpf_alpha=0.3 적용.
         nodes.append(_correction_node('lidar2_pointcloud_correction',
-                                       '/lidar_2/scan_3D', '/lidar_2/scan_3D_corrected', dx=0.1))
+                                       '/lidar_2/scan_3D', '/lidar_2/scan_3D_corrected',
+                                       dx=-0.05, lpf_alpha=0.3))
     else:
         print("[view_piper_lidar] CygLiDAR가 1개만 감지됨 - lidar_2 노드는 건너뜀.")
 

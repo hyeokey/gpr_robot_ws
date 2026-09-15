@@ -127,7 +127,15 @@
        2026-09-04 실물 대조 후 link6 Z축(마운트 바깥 방향) 기준 90도 반시계 회전을 적용했고, 그 위에
        추가로 반시계 13.2도를 더 얹음 - 브라켓이 J6=0도 위치에 물리적으로 정위치가 아니게 조립되어
        있는 걸 보정하는 값(18도 시계방향 -> 13.21 -> 12.21 -> 13 -> 13.2도 반시계로 미세조정).
-       (판+벽+라이다 전체를 강체로 묶어서 회전 - 서로간 상대 위치/방향은 그대로, link6 기준 자세만 회전). -->
+       (판+벽+라이다 전체를 강체로 묶어서 회전 - 서로간 상대 위치/방향은 그대로, link6 기준 자세만 회전).
+       2026-09-15: 13.2도 -> 15도 -> 13도 -> 13.4도로 순차 재조정(마지막 값: 총 90+13.4=103.4도,
+       yaw=1.804670). 강체 전체가 link6 Z축 기준으로 회전하는 것이므로, 이
+       조인트를 포함해 link6에 직접 매달린 아래 10개 조인트(mount_plate/wall_left/wall_right/
+       wall_top/extension_plate/extension_wall_left/extension_wall_right/wall_bottom/
+       lidar_1_joint/lidar_2_joint) 전부 값이 바뀔 때마다 yaw를 같이 조정하고 xy도 그만큼
+       link6 Z축 기준으로 같이 회전시켰다(각 점의 link6 원점으로부터의 거리/상대 배치는 그대로,
+       각도만 밀림) - lidar_*_optical_joint(센서 몸체 내부 렌즈 오프셋)는 이 강체 마운트
+       각도와 무관해서 안 건드림. -->
   <link name="mount_plate">
     <visual>
       <geometry><box size="0.30 0.30 0.01" /></geometry>
@@ -135,7 +143,7 @@
     </visual>
   </link>
   <joint name="mount_plate_joint" type="fixed">
-    <origin xyz="-0.0973579 -0.0228351 0.005" rpy="0 0 1.80118" />
+    <origin xyz="-0.097278 -0.023175 0.005" rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="mount_plate" />
   </joint>
@@ -147,7 +155,7 @@
     </visual>
   </link>
   <joint name="wall_left_joint" type="fixed">
-    <origin xyz="-0.064247 -0.164004 0.03" rpy="0 0 1.80118" />
+    <origin xyz="-0.063674 -0.164228 0.03" rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="wall_left" />
   </joint>
@@ -159,7 +167,7 @@
     </visual>
   </link>
   <joint name="wall_right_joint" type="fixed">
-    <origin xyz="-0.130469 0.118334 0.03" rpy="0 0 1.80118" />
+    <origin xyz="-0.130882 0.117877 0.03" rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="wall_right" />
   </joint>
@@ -171,7 +179,7 @@
     </visual>
   </link>
   <joint name="wall_top_joint" type="fixed">
-    <origin xyz="-0.238527 -0.055946 0.03" rpy="0 0 1.80118" />
+    <origin xyz="-0.238330 -0.056778 0.03" rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="wall_top" />
   </joint>
@@ -187,8 +195,8 @@
   </link>
 
   <joint name="extension_plate_joint" type="fixed">
-    <origin xyz="0.146037 0.034253 0.005"
-            rpy="0 0 1.80118" />
+    <origin xyz="0.145917 0.034763 0.005"
+            rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="extension_plate" />
   </joint>
@@ -205,8 +213,8 @@
   </link>
 
   <joint name="extension_wall_left_joint" type="fixed">
-    <origin xyz="0.179148 -0.106916 0.03"
-            rpy="0 0 1.80118" />
+    <origin xyz="0.179520 -0.106290 0.03"
+            rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="extension_wall_left" />
   </joint>
@@ -223,8 +231,8 @@
   </link>
 
   <joint name="extension_wall_right_joint" type="fixed">
-    <origin xyz="0.112926 0.175422 0.03"
-            rpy="0 0 1.80118" />
+    <origin xyz="0.112313 0.175815 0.03"
+            rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="extension_wall_right" />
   </joint>
@@ -241,20 +249,28 @@
   </link>
 
   <joint name="wall_bottom_joint" type="fixed">
-    <origin xyz="0.238527 0.055946 0.03"
-            rpy="0 0 1.80118" />
+    <origin xyz="0.238330 0.056778 0.03"
+            rpy="0 0 1.804670" />
     <parent link="link6" />
     <child link="wall_bottom" />
   </joint>
 
   <!-- CygLiDAR D1 mount (2개, 판떼기 양쪽에 대칭 장착, 2026-09-09부터 lidar_1/lidar_2로 구분):
        preview_plate.py에서 실측한 마운트 플레이트+브라켓 오프셋에 위 회전들을 동일하게 합성
-       적용함. link6(손목) 기준 위쪽 벽 바깥면 중앙에 센서가 부착됨. -->
+       적용함. link6(손목) 기준 위쪽 벽 바깥면 중앙에 센서가 부착됨.
+       2026-09-15 재실측(몸체/렌즈 오프셋 정밀화): 판 전체 외곽 50cm x 30cm, 측면 총 두께
+       5cm(판 1cm + 벽 4cm). LiDAR 몸체는 2.4cm(전후, 로컬 X) x 3.7cm x 3.7cm이고 몸체 중심은
+       측면 5cm의 정중앙(z=2.5cm, 아래 lidar_1_joint/lidar_2_joint의 z=0.025가 이 값). 긴 방향
+       끝 외곽면은 판 중심에서 ±25cm, 센서 두께 절반(1.2cm)을 더해 몸체 중심은 ±26.2cm. 실제
+       렌즈 중심은 몸체 중심에서 전방(+X) 12mm, 정면 3.7cm 폭 중심에서 수평 2.5mm 편심 - 후면에서
+       본 축 기준 lidar_1/lidar_2 둘 다 +Z로 2.5mm(아래 각 optical_joint 참고 - 2026-09-15
+       처음엔 lidar_2만 -Z로 가정했었는데 RViz 실측 확인 결과 반대(거울대칭 아님, 둘 다 +Z)로
+       정정함). -->
   <link name="lidar_1_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <box size="0.037 0.024 0.037" />
+        <box size="0.024 0.037 0.037" />
       </geometry>
       <material name="lidar_black">
         <color rgba="0.1 0.1 0.1 1" />
@@ -270,8 +286,18 @@
          이 회전과 우연히 불변이라 그대로, yaw만 -166.8도->-76.8도로 바뀜; 계산 검증 완료).
          이어서 같은 날 재확인: 이번엔 파란(Z) 축 기준 반시계 90도 추가 필요 확인
          (X->기존 Y 위치, Y->기존 -X 위치, Z 그대로) - 로컬 Z축 기준 +90도 회전을 추가로 합성
-         (roll 0, pitch -90, yaw 13.2도로 바뀜; 계산 검증 완료). -->
-    <origin xyz="-0.255078 -0.0598279 0.03" rpy="0.0 -1.570796 0.230383" />
+         (roll 0, pitch -90, yaw 13.2도로 바뀜; 계산 검증 완료).
+         2026-09-14: 판떼기를 재장착하면서 lidar_1/lidar_2 물리 위치가 서로 뒤바뀐 것으로
+         실측 확인(TF상 lidar_1이 실제로는 lidar_2 자리에, lidar_2가 lidar_1 자리에 있었음 -
+         180도 회전 재장착으로 추정). lidar_2_joint와 값을 맞바꿈(대칭 설계라 xyz는 부호만
+         반대였어서 그대로 교환 가능) - 아래 lidar_2_joint도 같이 확인할 것.
+         2026-09-15: z를 0.03 -> 0.025로 재조정(몸체 중심이 측면 5cm의 정중앙이라는 재실측
+         반영 - 위 CygLiDAR D1 mount 주석 참고).
+         2026-09-15: 마운트 강체 회전을 13.2도->15도로 재조정하면서(위 mount_plate_joint 주석
+         참고) xy/yaw도 link6 Z축 기준 1.8도만큼 같이 회전(-76.8도->-75.0도).
+         2026-09-15: 다시 13도로 재조정하면서 xy/yaw도 같이 회전(-75.0도->-77.0도).
+         2026-09-15: 13.4도로 재조정하면서 xy/yaw도 같이 회전(-77.0도->-76.6도). -->
+    <origin xyz="0.254867 0.060719 0.025" rpy="-1.570796 -1.570796 -1.336923" />
     <parent link="link6" />
     <child link="lidar_1_link" />
   </joint>
@@ -283,8 +309,10 @@
   <link name="lidar_1_optical_frame" />
   <joint name="lidar_1_optical_joint" type="fixed">
     <!-- 2026-09-09: 90도 추가(180도)가 반대 방향으로 틀어져서, 원래 90도에서 반대 방향으로
-         90도 돌려 0도로 변경함. -->
-    <origin xyz="0 0 0" rpy="0 0 0" />
+         90도 돌려 0도로 변경함.
+         2026-09-15: 렌즈 중심이 몸체 중심과 안 일치한다는 재실측 반영 - 전방(+X) 12mm, +Z로
+         2.5mm(위 CygLiDAR D1 mount 주석 참고). 이전엔 0 0 0(몸체 중심=렌즈 중심 가정)이었음. -->
+    <origin xyz="0.012 0 0.0025" rpy="0 0 0" />
     <parent link="lidar_1_link" />
     <child link="lidar_1_optical_frame" />
   </joint>
@@ -293,7 +321,7 @@
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <box size="0.037 0.024 0.037" />
+        <box size="0.024 0.037 0.037" />
       </geometry>
       <material name="lidar_black" />
     </visual>
@@ -305,18 +333,29 @@
          1) 파란(Z)축 기준 반시계 90도(lidar_1의 첫 보정과 동일) - roll 0/pitch -90/yaw -76.8도.
          2) 이어서 빨강(X)축 기준 -90도 추가 확인(초록->기존 -파랑 위치, 파랑->기존 초록 위치,
             빨강 고정) - 로컬 X축 기준 -90도 합성, roll -90/pitch -90/yaw -76.8도로 변경;
-            계산 검증 완료. -->
-    <origin xyz="0.255078 0.0598279 0.03"
-            rpy="-1.570796 -1.570796 -1.340413" />
+            계산 검증 완료.
+         2026-09-14: 위 lidar_1_joint와 동일한 이유로 값을 맞바꿈(판떼기 180도 재장착 추정).
+         2026-09-15: z를 0.03 -> 0.025로 재조정(lidar_1_joint와 같은 이유 - 위 CygLiDAR D1
+         mount 주석 참고).
+         2026-09-15: 마운트 강체 회전을 13.2도->15도로 재조정하면서(위 mount_plate_joint 주석
+         참고) xy/yaw도 link6 Z축 기준 1.8도만큼 같이 회전(13.2도->15.0도 - 공교롭게 이 조인트의
+         yaw가 그 값 자체와 일치해서 그대로 15도가 됨).
+         2026-09-15: 다시 13도로 재조정하면서 xy/yaw도 같이 회전(15.0도->13.0도).
+         2026-09-15: 13.4도로 재조정하면서 xy/yaw도 같이 회전(13.0도->13.4도). -->
+    <origin xyz="-0.254867 -0.060719 0.025"
+            rpy="0.0 -1.570796 0.233873" />
     <parent link="link6" />
     <child link="lidar_2_link" />
   </joint>
 
-  <!-- lidar_1_optical_joint와 같은 개념(포인트클라우드 데이터 축 매핑). lidar_1 것과 같은 값을
-       임시로 복사해둠 - lidar_2_joint 회전이 아직 검증 전이라 이것도 같이 재검증 필요. -->
+  <!-- lidar_1_optical_joint와 같은 개념(포인트클라우드 데이터 축 매핑).
+       2026-09-15: "lidar_1 것과 같은 값을 임시로 복사해둠"이던 상태에서 벗어나 재실측 완료 -
+       렌즈 오프셋은 lidar_1과 완전히 동일(전방 +X 12mm, +Z 2.5mm). 처음엔 몸체가 반대쪽에
+       대칭 장착되어 있으니 Z도 거울대칭(-2.5mm)일 거라 가정했었는데, RViz로 실제 두 optical
+       frame 위치를 눈으로 비교해보니 반대(둘 다 +Z)인 것으로 확인되어 정정함. -->
   <link name="lidar_2_optical_frame" />
   <joint name="lidar_2_optical_joint" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <origin xyz="0.012 0 0.0025" rpy="0 0 0" />
     <parent link="lidar_2_link" />
     <child link="lidar_2_optical_frame" />
   </joint>
