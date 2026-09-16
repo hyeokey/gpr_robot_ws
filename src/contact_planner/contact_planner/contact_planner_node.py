@@ -200,7 +200,8 @@ ALIGN_STANDOFF_M = 0.06  # LiDAR가 확실히 보이는 정렬 거리 - 실험�
 # 사실상 같은 거리라 LiDAR 평면 검출 자체가 불안정할 위험이 있었고, 실제로 그 근처에서 IK가
 # 계속 실패하며 목표가 발산하는 현상이 실측됨(joint1이 소프트 한계까지 밀림 - 2026-09-15
 # 안전 조사 참고). 3cm는 너무 공격적이었다고 보고 6cm로 한 단계 올림 - 여전히 20cm대보다는
-# 훨씬 가깝지만 MIN_VALID_DIST_M보다는 확실히 떨어져 있음. 재현되면 계속 올릴 것.
+# 훨씬 가깝지만 MIN_VALID_DIST_M보다는 확실히 떨어져 있음.
+# 2026-09-16: 6cm -> 8cm -> 10cm로 올렸다가, 다시 6cm로 되돌림.
 FINAL_STANDOFF_M = 0.03  # 최종 접근 거리 - 기존 PRE_CONTACT_OFFSET_M 튜닝값(1->3->5->7->6cm) 승계 후 3cm로 재조정.
 FINAL_APPROACH_STEP_M = 0.005  # LOCK 이후 tick마다 standoff를 줄이는 양(0.5cm)
 FINAL_APPROACH_STEP_PERIOD_S = 0.5  # 그 tick 주기(초) - LiDAR 피드백 없는 구간이라 보수적으로 느리게
@@ -230,11 +231,14 @@ TIP_SETTLE_WINDOW = 10           # 최근 이 프레임 동안 안 움직였는�
 TIP_SETTLE_POS_TOL_M = 0.003     # 3mm
 TIP_SETTLE_ANGLE_TOL_DEG = 1.0   # 1도
 
-# 2026-09-11 정렬 정확도 개선 - 듀얼 LiDAR 일관성 진단: 합쳐진 평면 하나만 보면 한쪽 라이다의
-# 마운트/TF 보정이 살짝 틀어져 있어도 못 알아챌 수 있어서, 각 라이다 inlier만으로 독립적으로
-# 법선을 구해 서로/병합값과 비교하는 진단 로그를 낸다(자동 보정은 안 함 - 사용자가 직접 판단).
-DUAL_LIDAR_MIN_INLIERS_EACH = 20  # 이보다 적으면 그 라이다의 개별 법선 추정은 신뢰 안 하고 건너뜀
-DUAL_LIDAR_NORMAL_DISAGREEMENT_WARN_DEG = 5.0
+# 2026-09-11 정렬 정확도 개선 - 듀얼 LiDAR 일관성 진단: 원래는 합쳐진 평면 하나만 보면 한쪽
+# 라이다의 마운트/TF 보정이 살짝 틀어져 있어도 못 알아챌 수 있어서, 각 라이다 inlier만으로
+# 독립적으로 법선을 구해 서로/병합값과 비교하는 진단 로그를 냈다(자동 보정은 안 함).
+# 2026-09-16: RANSAC/SVD 검출 자체를 lidar_1만 쓰도록 바꾸면서(_process_merged_cloud 설명
+# 참고 - lidar_2 오차가 크다는 사용자 판단) 이 진단도 "lidar_2 점들이 lidar_1 기준 평면에서
+# 얼마나 떨어져 있는가"(단방향 잔차)로 단순화 - DUAL_LIDAR_MIN_INLIERS_EACH만 그 판정(평면
+# 근처 점이 이보다 적으면 통계 신뢰 안 함) 기준으로 재사용, 양방향 법선차 경고는 제거.
+DUAL_LIDAR_MIN_INLIERS_EACH = 20
 
 # 2026-09-11 접촉 감지(사용자 설계): FINAL_APPROACH가 원래는 완전 open-loop였는데(LiDAR가
 # 이 거리에서 죽으니 피드백이 없음), 그 "죽는다"는 현상 자체를 거꾸로 근접 신호로 쓴다.
@@ -513,7 +517,8 @@ class ContactPlannerNode(Node):
         if points1_base is None or points2_base is None:
             return  # 둘 중 하나라도 TF 조회 실패 - 이번 프레임은 스킵, 다음 스캔에서 재시도
 
-        n1 = points1_base.shape[0]
+        # /lidar/scan_3D_merged는 여전히 lidar_1+lidar_2를 합쳐서 발행한다 - rviz로 둘 다 계속
+        # 눈으로 볼 수 있게. 아래 평면 검출 입력과는 별개(다음 줄 참고).
         merged_points = np.vstack([points1_base, points2_base])
 
         t1 = stamp_to_sec(msg1.header.stamp)
@@ -523,9 +528,16 @@ class ContactPlannerNode(Node):
         merged_msg_header.frame_id = BASE_FRAME
         self.merged_cloud_pub.publish(point_cloud2.create_cloud_xyz32(merged_msg_header, merged_points.tolist()))
 
-        self._process_merged_cloud(merged_points, n1, merged_msg_header.stamp)
+        # 2026-09-16: RANSAC/SVD 평면 검출은 lidar_1만 쓴다(사용자 판단 - lidar_2 오차가 큼).
+        # lidar_2는 여전히 필터링/TF변환/위 merged_cloud_pub 시각화는 그대로 하되, 실제 평면
+        # 추정(_process_merged_cloud)에는 안 들어간다 - points2_base는 lidar_2가 그 lidar_1
+        # 기준 평면과 얼마나 안 맞는지 참고 로그를 내는 용도로만 넘긴다.
+        self._process_merged_cloud(points1_base, points2_base, merged_msg_header.stamp)
 
-    def _process_merged_cloud(self, points: np.ndarray, n1: int, stamp):
+    def _process_merged_cloud(self, points: np.ndarray, points2_ref: np.ndarray, stamp):
+        """points: 평면 검출(RANSAC+SVD)에 실제로 쓰는 점들 - 2026-09-16부터 lidar_1만.
+        points2_ref: lidar_2 점들 - 검출엔 안 쓰고, 검출된 평면과 얼마나 안 맞는지 참고
+        로그만 낸다(모듈 docstring/`_on_clouds` 설명 참고)."""
         if self.state == STATE_FINAL_APPROACH:
             # LOCK 이후엔 LiDAR 결과를 다시 안 본다 - _final_approach_tick이 대신 목표를 낸다.
             # /lidar/scan_3D_merged는 계속 발행되니(_on_clouds에서) 벽 근처에서 LiDAR가 실제로
@@ -534,7 +546,7 @@ class ContactPlannerNode(Node):
 
         if points.shape[0] < MIN_POINTS:
             self.get_logger().warn(
-                f"merge된 포인트 수 부족({points.shape[0]} < {MIN_POINTS}) - 이 프레임은 건너뜁니다.",
+                f"lidar_1 포인트 수 부족({points.shape[0]} < {MIN_POINTS}) - 이 프레임은 건너뜁니다.",
                 throttle_duration_sec=2.0,
             )
             return
@@ -574,9 +586,6 @@ class ContactPlannerNode(Node):
             )
             return
 
-        n1_inliers = int(np.count_nonzero(inliers < n1))
-        n2_inliers = int(len(inliers) - n1_inliers)
-
         latest = Time()
         tip_tf = self._lookup(BASE_FRAME, TIP_FRAME, latest)
         if tip_tf is None:
@@ -589,45 +598,26 @@ class ContactPlannerNode(Node):
         if np.dot(normal_base, tip_pos - centroid) < 0:
             normal_base = -normal_base
 
-        # 2026-09-11 듀얼 LiDAR 일관성 진단(DUAL_LIDAR_* 설명 참고): 자동 보정은 안 하고
-        # lidar_1/lidar_2 각자의 inlier만으로 독립적으로 법선을 구해 서로/병합값과 비교하는
-        # 로그만 낸다. 이 프레임의 원값(스무딩 전) 기준으로 비교 - 시간에 걸친 스무딩 효과가
-        # 섞이면 "지금 이 순간 두 라이다가 일치하는지"를 보기 어려워짐.
-        inlier_lidar_mask = inliers < n1  # True=lidar_1 소속
-        per_lidar_normals = {}
-        diag_parts = []
-        for label, mask in (("lidar_1", inlier_lidar_mask), ("lidar_2", ~inlier_lidar_mask)):
-            sub = inlier_points[mask]
-            if sub.shape[0] < DUAL_LIDAR_MIN_INLIERS_EACH:
-                diag_parts.append(f"{label}:점부족({sub.shape[0]})")
-                continue
-            sub_centroid = sub.mean(axis=0)
-            _, _, sub_vh = np.linalg.svd(sub - sub_centroid, full_matrices=False)
-            sub_normal = sub_vh[-1]
-            sub_normal /= np.linalg.norm(sub_normal)
-            if np.dot(sub_normal, normal_base) < 0:  # 병합 법선과 같은 반구로 정렬해서 비교
-                sub_normal = -sub_normal
-            residual_rms_mm = float(np.sqrt(np.mean(
-                (np.dot(sub - sub_centroid, sub_normal)) ** 2))) * 1000.0
-            # 평면의 두 접선 방향(sub_vh[0]/sub_vh[1])으로 투영해 점이 한 줄로만 몰려있진
-            # 않은지(=법선이 부실하게 구속됐는지) 퍼짐으로도 확인 - 개수만으로는 못 거름.
-            proj = (sub - sub_centroid) @ np.stack([sub_vh[0], sub_vh[1]], axis=1)
-            spread_m = proj.max(axis=0) - proj.min(axis=0)
-            angle_vs_merged_deg = vector_angle_deg(sub_normal, normal_base)
-            per_lidar_normals[label] = sub_normal
-            diag_parts.append(
-                f"{label}:n={sub.shape[0]} 병합법선차={angle_vs_merged_deg:.1f}도 "
-                f"잔차rms={residual_rms_mm:.1f}mm 퍼짐={spread_m[0]*100:.0f}x{spread_m[1]*100:.0f}cm")
-        if "lidar_1" in per_lidar_normals and "lidar_2" in per_lidar_normals:
-            disagreement_deg = vector_angle_deg(per_lidar_normals["lidar_1"], per_lidar_normals["lidar_2"])
-            diag_parts.append(f"lidar_1-lidar_2 법선차={disagreement_deg:.1f}도")
-            if disagreement_deg > DUAL_LIDAR_NORMAL_DISAGREEMENT_WARN_DEG:
-                self.get_logger().warn(
-                    f"lidar_1/lidar_2 개별 법선이 {disagreement_deg:.1f}도 차이남(임계 "
-                    f"{DUAL_LIDAR_NORMAL_DISAGREEMENT_WARN_DEG}도) - 마운트/TF 캘리브레이션 "
-                    f"어긋남 의심.",
-                    throttle_duration_sec=5.0,
-                )
+        # 2026-09-16: RANSAC/SVD 검출 자체는 lidar_1만 쓰지만(_on_clouds 설명 참고 - lidar_2
+        # 오차가 크다는 사용자 판단), lidar_2가 그 검출된 평면과 실제로 얼마나 안 맞는지는
+        # 참고용으로 계속 로그를 낸다(자동 보정/피드백 없음 - 순수 모니터링). 예전엔 양쪽
+        # 각자의 inlier로 독립적으로 법선을 구해 서로 비교했는데(듀얼 라이다 "일관성" 진단),
+        # 이제 lidar_1이 유일한 검출 기준이라 "lidar_2 점들이 그 평면에서 얼마나 떨어져
+        # 있는가"(단방향)로 단순화.
+        lidar1_residual_rms_mm = float(np.sqrt(np.mean(
+            (np.dot(inlier_points - centroid, normal_base)) ** 2))) * 1000.0
+        diag_parts = [f"lidar_1(검출용): n={len(inliers)} 잔차rms={lidar1_residual_rms_mm:.1f}mm"]
+        if points2_ref.shape[0] > 0:
+            dist2_mm = np.dot(points2_ref - centroid, normal_base) * 1000.0
+            near_plane2 = np.abs(dist2_mm) < (RANSAC_THRESH_M * 1000.0)
+            n2_near = int(np.count_nonzero(near_plane2))
+            if n2_near >= DUAL_LIDAR_MIN_INLIERS_EACH:
+                lidar2_residual_rms_mm = float(np.sqrt(np.mean(dist2_mm[near_plane2] ** 2)))
+                diag_parts.append(
+                    f"lidar_2(참고,미사용): 평면 근처 {n2_near}점 "
+                    f"잔차rms={lidar2_residual_rms_mm:.1f}mm")
+            else:
+                diag_parts.append(f"lidar_2(참고,미사용): 평면 근처 점 부족({n2_near})")
         self.get_logger().info("[진단] " + " | ".join(diag_parts), throttle_duration_sec=2.0)
 
         # 법선 스무딩 (NORMAL_SMOOTHING_ALPHA 설명 참고): 첫 검출이면 그대로 쓰고, 그 다음
@@ -683,7 +673,9 @@ class ContactPlannerNode(Node):
             f"[ALIGN] 평면중심 ({centroid[0]:.3f},{centroid[1]:.3f},{centroid[2]:.3f}) "
             f"접촉점(수선투영) ({contact_point[0]:.3f},{contact_point[1]:.3f},{contact_point[2]:.3f}) "
             f"align_target ({align_target[0]:.3f},{align_target[1]:.3f},{align_target[2]:.3f}) "
-            f"inliers={len(inliers)}/{points.shape[0]} (lidar_1={n1_inliers}, lidar_2={n2_inliers})",
+            # 2026-09-16: RANSAC 입력이 lidar_1뿐이라 inliers는 전부 lidar_1 소속 - 굳이
+            # lidar_1/lidar_2로 나눠 찍을 필요가 없어져서 단순화(lidar_2 참고 잔차는 위 [진단] 로그).
+            f"inliers={len(inliers)}/{points.shape[0]}",
             throttle_duration_sec=1.0,
         )
 

@@ -38,12 +38,40 @@ EMA)와 같은 방식을 raw 좌표 자체에 건다. lpf_alpha가 1.0이면 필
 과 겹쳐서 과도하게 느려지지 않게 너무 작은 값은 피할 것. 무효 픽셀((0,0,0))은 이번 프레임
 출력에서도 무효로 그대로 두고(필터 상태 갱신도 안 함 - 다음에 다시 유효해지면 마지막으로
 유효했던 값부터 이어서 블렌딩), dx/dy/dz 보정 이후 단계에 적용한다(상수 오프셋이라 순서
-무관하지만 가독성상 보정 다음에 둠)."""
+무관하지만 가독성상 보정 다음에 둠).
+
+2026-09-16: dx/dy/dz(평행이동 보정)만으론 못 잡는 미세한 회전 오차(마운트/캘리브레이션)가
+rviz로 눈에 보여서, roll_deg/pitch_deg/yaw_deg(라이다 자신의 optical frame 축 기준 회전,
+X=전방/Y=왼쪽/Z=위 - 위 dx/dy/dz 설명과 동일 축 규약) 파라미터를 추가했다. dx/dy/dz와 같은
+패턴으로 재시작 없이 튜닝 가능:
+
+    ros2 param set /lidar1_pointcloud_correction roll_deg <값>
+    ros2 param set /lidar1_pointcloud_correction pitch_deg <값>
+    ros2 param set /lidar1_pointcloud_correction yaw_deg <값>
+
+회전을 먼저 원점 기준으로 적용한 다음(무효 픽셀 (0,0,0)은 원점이라 회전해도 그대로 (0,0,0)이라
+dx/dy/dz처럼 별도 마스킹 없이도 안전) dx/dy/dz 평행이동을 더하는 순서(R을 먼저, t는 그 다음 -
+"회전 후 이동"의 표준 강체변환 합성)."""
+import math
+
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2
+
+
+def _rotation_matrix(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    """optical frame 축(X=전방,Y=왼쪽,Z=위) 기준 내재적 회전(roll=X축, pitch=Y축, yaw=Z축)
+    합성 회전행렬 - roll 적용 후 pitch, 그 다음 yaw 순서(R = Rz @ Ry @ Rx)."""
+    r, pt, y = math.radians(roll_deg), math.radians(pitch_deg), math.radians(yaw_deg)
+    cr, sr = math.cos(r), math.sin(r)
+    cp, sp = math.cos(pt), math.sin(pt)
+    cy, sy = math.cos(y), math.sin(y)
+    rot_x = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    rot_y = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    rot_z = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return rot_z @ rot_y @ rot_x
 
 _PCL2_DTYPE = {
     1: np.int8, 2: np.uint8,
@@ -70,6 +98,9 @@ class LidarPointCloudCorrection(Node):
         self.declare_parameter("dx", 0.0)
         self.declare_parameter("dy", 0.0)
         self.declare_parameter("dz", 0.0)
+        self.declare_parameter("roll_deg", 0.0)
+        self.declare_parameter("pitch_deg", 0.0)
+        self.declare_parameter("yaw_deg", 0.0)
         self.declare_parameter("lpf_alpha", 1.0)  # 1.0=필터 없음(그대로 통과), 작을수록 더 부드러움
 
         input_topic = self.get_parameter("input_topic").value
@@ -85,10 +116,23 @@ class LidarPointCloudCorrection(Node):
         dx = self.get_parameter("dx").value
         dy = self.get_parameter("dy").value
         dz = self.get_parameter("dz").value
+        roll_deg = self.get_parameter("roll_deg").value
+        pitch_deg = self.get_parameter("pitch_deg").value
+        yaw_deg = self.get_parameter("yaw_deg").value
         lpf_alpha = self.get_parameter("lpf_alpha").value
 
         points = np.frombuffer(msg.data, dtype=_struct_dtype(msg)).copy()
         valid = (points["x"] != 0) | (points["y"] != 0) | (points["z"] != 0)
+
+        if roll_deg or pitch_deg or yaw_deg:
+            # 회전은 원점 기준이라 무효 픽셀((0,0,0))은 회전해도 그대로 (0,0,0) - dx/dy/dz처럼
+            # 별도 마스킹 없이도 안전하지만, 일관성/명확성을 위해 valid만 골라서 처리한다.
+            rot = _rotation_matrix(roll_deg, pitch_deg, yaw_deg)
+            xyz = np.stack([points["x"][valid], points["y"][valid], points["z"][valid]], axis=1)
+            xyz_rot = xyz @ rot.T
+            points["x"][valid], points["y"][valid], points["z"][valid] = (
+                xyz_rot[:, 0], xyz_rot[:, 1], xyz_rot[:, 2])
+
         if dx or dy or dz:
             # 드라이버가 무효 픽셀을 (0,0,0)으로 채우므로 그 자리는 보정하지 않는다 -
             # 안 그러면 (dx,dy,dz) 위치에 가짜 점이 생김.

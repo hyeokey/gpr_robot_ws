@@ -61,10 +61,12 @@ def _lidar_node(namespace, port, frame_id, frequency_channel, run_mode=1, remapp
     )
 
 
-def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.0, lpf_alpha=1.0):
+def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.0,
+                      roll_deg=0.0, pitch_deg=0.0, yaw_deg=0.0, lpf_alpha=1.0):
     """lidar_pointcloud_correction.py를 특정 라이다용으로 띄운다 - 2026-09-10 lidar_2 전용에서
     lidar_1도 같이 보정하도록 일반화(실측 대조 결과 lidar_1도 거리 오차가 있는 것으로 확인).
-    2026-09-15: lpf_alpha(픽셀별 시간축 EMA 강도) 추가 - 기본 1.0(필터 없음)."""
+    2026-09-15: lpf_alpha(픽셀별 시간축 EMA 강도) 추가 - 기본 1.0(필터 없음).
+    2026-09-16: roll_deg/pitch_deg/yaw_deg(회전 보정) 추가 - 기본 0.0(회전 없음)."""
     return Node(
         package='piper_description',
         executable='lidar_pointcloud_correction.py',
@@ -76,6 +78,9 @@ def _correction_node(node_name, input_topic, output_topic, dx=0.0, dy=0.0, dz=0.
             {'dx': dx},
             {'dy': dy},
             {'dz': dz},
+            {'roll_deg': roll_deg},
+            {'pitch_deg': pitch_deg},
+            {'yaw_deg': yaw_deg},
             {'lpf_alpha': lpf_alpha},
         ],
     )
@@ -132,8 +137,10 @@ def launch_setup(context, *args, **kwargs):
         # (-0.037 -> -0.038). 이 재조정과 세트로 lidar_2 dx도 0.1 -> 0.0으로 재설정함(아래).
         # 2026-09-15: lpf_alpha=0.3 - 픽셀별 EMA로 프레임 간 노이즈 완화(lidar_pointcloud_correction.py
         # docstring 참고). ros2 param set /lidar1_pointcloud_correction lpf_alpha <값>으로 재시작 없이 튜닝 가능.
+        # 2026-09-16: rviz로 포인트클라우드가 살짝 틀어져 보여 pitch_deg=-2.0으로 회전 보정 추가(실측 확정).
         _correction_node('lidar1_pointcloud_correction',
-                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.038, lpf_alpha=0.3),
+                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.038,
+                          pitch_deg=-2.0, lpf_alpha=0.3),
     ]
 
     if len(ports) > 1:

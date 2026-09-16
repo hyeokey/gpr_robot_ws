@@ -355,3 +355,80 @@ feedforward로 얹으면 사실상 PID처럼 정상상태 오차를 줄일 수 �
 파일 스냅샷을 대신 발행)이 이번 세션에서도 여러 번 재현되어 혼선을 빚음. `ros2 node list`로
 `piper_controller_node` 생존 여부를 매번 먼저 확인하고, 가능하면 그 노드 전용 토픽
 (`/orientation_error_deg`, `/tip_pose`)이 신선한 값을 내는지 같이 확인하는 습관을 들일 것.
+
+---
+
+## 2026-09-16 작업 기록
+
+### 1. 설정 변경: `ALIGN_STANDOFF_M` 6cm → 8cm → 10cm
+
+세션 도중 두 번에 걸쳐 상향(6→8, 8→10). 10cm는 `MIN_VALID_DIST_M`(10cm)과 정확히 같은 값이라,
+벽이 라이다 원점 기준 최소유효거리 경계에 딱 걸려서 노이즈에 따라 inlier가 들쭉날쭉 잡힐 수
+있음 - 평면 검출이 불안정해 보이면(inlier 수 급변 등) 12~15cm로 더 올릴 것.
+
+### 2. `contact_planner_node.py`: RANSAC/SVD 평면 검출을 lidar_1만 쓰도록 변경
+
+사용자 판단(lidar_2 오차가 큼)에 따라 평면 검출 입력을 lidar_1 단독으로 제한:
+- `_process_merged_cloud(points, n1, stamp)` → `_process_merged_cloud(points1, points2_ref, stamp)`로
+  시그니처 변경 - `points1`(lidar_1)만 RANSAC+SVD에 쓰고, `points2_ref`(lidar_2)는 검출된
+  평면과 얼마나 안 맞는지 참고 잔차만 로그로 남긴다(자동 보정/피드백 없음).
+- `/lidar/scan_3D_merged`(rviz 시각화)는 그대로 lidar_1+lidar_2 합쳐서 계속 발행 - 검출
+  입력과는 별개.
+- 기존 "듀얼 라이다 일관성 진단"(양쪽 독립 법선 비교)은 lidar_2가 검출에 안 쓰이니 의미가
+  없어져 제거, "lidar_2 점들이 lidar_1 기준 평면에서 얼마나 떨어져 있는가"(단방향 잔차)로
+  단순화. `DUAL_LIDAR_NORMAL_DISAGREEMENT_WARN_DEG`는 제거, `DUAL_LIDAR_MIN_INLIERS_EACH`는
+  재사용.
+- ⚠️ 리팩터 도중 `n1_inliers`/`n2_inliers`를 쓰던 `[ALIGN]` 로그 줄을 못 보고 남겨둬서 첫
+  실행에서 `NameError`로 크래시 - 그 로그도 `inliers=X/Y`로 단순화해서 수정 완료.
+
+### 3. `lidar_pointcloud_correction.py`: 회전 보정 파라미터(roll_deg/pitch_deg/yaw_deg) 추가
+
+rviz에서 포인트클라우드가 살짝 틀어져 보여서, dx/dy/dz(평행이동)와 같은 패턴으로 회전 보정
+3개를 추가(재시작 없이 `ros2 param set /lidar1_pointcloud_correction yaw_deg <값>` 등으로
+튜닝). 회전은 원점(라이다 자신) 기준으로 dx/dy/dz보다 먼저 적용 - 무효 픽셀(0,0,0)은 회전해도
+그대로 (0,0,0)이라 별도 마스킹 없이 안전. `view_piper_lidar.launch.py`의 `_correction_node()`
+헬퍼도 이 3개 인자를 받도록 확장. 실측 확정값으로 lidar_1 `pitch_deg=-2.0`을 launch 기본값에
+반영함(lidar_2는 미조정 상태로 남음 - 필요하면 추가 확인할 것).
+
+### 4. `push_forward_node.py` LEVEL 실측 버그 발견/수정: Cartesian IK 재변환이 관절을 미세하게 드리프트시킴
+
+어제(9/15) 재설계한 joint4/5 grid search가 실측에서 여전히 발산(joint4가 51도→99도까지
+계속 커지며 관절한계까지 밀림, 모서리 퍼짐도 안 줄어듦)해서 재조사:
+
+- **원인 확인(시뮬레이션)**: grid search가 찾은 목표 관절값(joint1/2/3/6 불변 + joint4/5만
+  변경)을 FK로 Cartesian pose로 바꿔서 `piper_controller_node`의 `solve_ik_best()`에 다시
+  넣으면, 그 IK가 자기 시드(연속성 유지용, 실제 관절값과 100% 동일하다는 보장 없음) 기준으로
+  다시 풀면서 **요청하지 않은 joint2/3/6까지 사이클마다 최대 0.9도씩 같이 틀어지는** 게
+  실측으로 확인됨. "joint1/2/3/6은 안 바뀐다"는 이 알고리즘의 핵심 전제가 매 사이클 조용히
+  깨지고 있었음 - 이게 누적되어 발산으로 이어짐(중력 때문이라는 최초 가설과는 다른 원인).
+- **근본 수정**: `piper_controller_node.py`에 **Cartesian IK를 아예 안 거치는 새 입력 경로**
+  `/piper/target_joint_deg`(`Float64MultiArray`, 관절각 6개·도)를 추가. 관절한계 하드체크
+  (`IK_HARD_LIMIT_SLACK_DEG`)와 속도상한 램프는 기존 Cartesian 경로와 동일하게 적용하되,
+  IK 자체는 안 풂 - 신선하면 기존 Cartesian 목표(`/piper/target_pose`)보다 우선한다
+  (`_maybe_start_joint_ramp()`, `JOINT_TARGET_EPS_DEG`=0.05도). `push_forward_node.py`의
+  `_compute_level_target()`은 이제 관절각 6개를 그대로 리턴하고, 그 값을 이 새 토픽으로
+  직접 발행한다(PUSH 상태는 여전히 기존 Cartesian 경로 사용, 안 바뀜).
+- **수정 후에도 문제 재현**: 이 근본 수정 이후에도 **똑같은 패턴**(joint4가 60도→99도까지
+  계속 커지며 관절한계까지 밀림, 모서리 퍼짐 36mm대에서 정체)이 재현됨 - IK 드리프트는
+  확실히 제거했는데도 동일 증상이라는 게 오히려 결정적 단서가 됨.
+- **진짜 원인 확정(실측)**: `/piper/target_joint_deg`(명령한 목표)와 `/joint_states`(실제
+  도달값)를 동시에 두 번 비교 - **joint6처럼 grid search가 전혀 건드리지 않는 관절도 명령값과
+  실제값이 1.7~3도씩 차이남**(나머지 관절은 0.1~1.1도 차이). 이는 IK 문제가 아니라 **MIT
+  저수준 PD(kp=10)가 이 자세의 중력 부하를 못 이겨서 생기는 진짜 정상상태 추종오차**임 -
+  사용자가 처음에 제기했던 "중력 때문 아니냐"는 가설이 맞았던 것으로 결론.
+  이 오차가 위험한 이유: grid search가 매 사이클 "현재 실제 관절값"(이미 중력으로 밀려있는
+  값)을 새 기준으로 삼다 보니, 건드리지 않은 관절의 기준점 자체가 계속 밀리고, joint4도
+  "여기서 조금 더"가 매번 그 밀린 기준 위에서 반복되며 관절한계(±100도)까지 발산함.
+- **결론**: joint4/5 grid search + IK-바이패스 직접 관절 지정이라는 아키텍처 자체는 검증됨
+  (더 이상 의도 안 한 관절 드리프트 없음). 남은 병목은 **MIT PD의 물리적 정상상태 오차**이고,
+  이건 9/15 세션 9번 항목에 이미 적어둔 "MIT에 중력보상/적분(I) feedforward 추가" 작업으로만
+  근본 해결 가능 - 오늘은 여기서 멈추고 그 작업을 다음 세션 최우선 후보로 확정.
+- ⚠️ 이 실측 중 joint4가 ±100도 한계 근처까지 밀린 채로 세션이 끝남 - 다음 시작 시 팔 상태/
+  anchor 위치 확인할 것.
+
+### 5. 다음 세션 최우선 후보: MIT 저수준 PD 중력보상/적분(I) feedforward (9/15 9번 항목 재확인)
+
+위 4번 항목에서 실측으로 명확히 필요성이 재확인됨. `mit_send()`가 매번 0.0으로 고정해서
+보내는 `torque_ff`에 중력보상(자세별 예상 중력토크 추정) 또는 위치오차 누적(적분)을 얹는
+방향 - 적분 와인드업 방지 클램프/리셋을 반드시 같이 설계할 것. 이게 해결되면 push_forward_node
+LEVEL의 joint4/5 grid search가 실제로 3mm 밑까지 수렴하는지 재검증.

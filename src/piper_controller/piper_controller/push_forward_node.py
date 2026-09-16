@@ -83,6 +83,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float64MultiArray
 
 GPR_ROBOT_DIR = os.path.expanduser("~/gpr_robot")
 if GPR_ROBOT_DIR not in sys.path:
@@ -202,8 +203,8 @@ class PushForwardNode(Node):
         # 2026-09-15 LEVEL 단계용 상태 (모듈 docstring 참고).
         self._wall_centroid = None  # contact_planner_node가 LOCK한 벽 평면 중심
         self._wall_normal = None    # 같은 평면 법선("벽->tip" 방향, contact_planner_node와 동일 부호)
-        self._level_target_pos = None  # 정지 확인 후 재계산되는 감쇠 스텝의 최신 결과(퍼블리시용)
-        self._level_target_orn = None
+        self._level_target_deg6 = None  # 정지 확인 후 재계산되는 손목(joint4/5) 보정의 최신
+        # 결과(관절각 6개, 도) - /piper/target_joint_deg 퍼블리시용
         self._level_hold_count = 0
         self._link6_pose_history = deque(maxlen=LEVEL_SETTLE_WINDOW)  # (pos, orn) - 다음 감쇠
         # 스텝을 계산할 타이밍 게이팅용(_link6_is_settled)
@@ -216,6 +217,10 @@ class PushForwardNode(Node):
         self.contact_image_sub = self.create_subscription(
             Image, CONTACT_IMAGE_TOPIC, self._on_contact_image, 10)
         self.target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
+        # 2026-09-16: LEVEL(joint4/5 grid search) 전용 - Cartesian IK를 안 거치는 직접 관절각
+        # 지정 경로(piper_controller_node의 JOINT_TARGET_EPS_DEG 설명 참고). PUSH는 여전히
+        # target_pub(Cartesian)을 쓴다.
+        self.joint_target_pub = self.create_publisher(Float64MultiArray, "/piper/target_joint_deg", 10)
         self.timer = self.create_timer(PUSH_STEP_PERIOD_S, self._tick)
 
         push_desc = (
@@ -333,11 +338,18 @@ class PushForwardNode(Node):
         return max(distances.values()) - min(distances.values())
 
     def _compute_level_target(self):
-        """LEVEL 목표(link6 pos/orn) 계산 - 2026-09-15 재설계(모듈 상단 설명 참고). joint1/2/3/6은
+        """LEVEL 목표(관절각 6개, 도) 계산 - 2026-09-15 재설계(모듈 상단 설명 참고). joint1/2/3/6은
         지금 값 그대로 두고, joint4/5 두 개만 조합을 바꿔가며 순수 FK로 "모서리 퍼짐"이 가장
         작아지는 조합을 찾는다(grid search, 로봇 안 움직임 - WRIST_SEARCH_STEP_DEG 간격으로
-        ±WRIST_MAX_DELTA_DEG 범위). 찾은 조합의 FK로 link6 목표 pose를 만들어 리턴 - 나머지
-        4개 관절은 요청값이 지금과 완전히 같으므로 IK가 항상 지금 자세 바로 옆으로만 수렴한다.
+        ±WRIST_MAX_DELTA_DEG 범위).
+
+        2026-09-16: 찾은 조합을 Cartesian pose로 바꿔서 /piper/target_pose(Cartesian IK 경로)로
+        보내던 걸 그만뒀다 - 그 IK가 요청 안 한 joint2/3/6까지 사이클마다 최대 0.9도씩 같이
+        틀어뜨리는 게 실측 확인되어(piper_controller_node의 JOINT_TARGET_EPS_DEG 설명 참고),
+        joint4/5만 바꾼다는 이 함수의 전제 자체가 매 사이클 조용히 깨지고 있었다. 이제 관절각
+        6개를 그대로 리턴하고, 호출부가 /piper/target_joint_deg(직접 관절 지정, IK 안 거침)로
+        발행한다 - 그래야 "joint1/2/3/6은 안 바뀐다"는 전제가 실제로 보장된다.
+
         실패(TF/벽 평면/관절상태 없음, 개선되는 조합 없음)하면 None."""
         if self._wall_centroid is None or self._wall_normal is None:
             return None
@@ -378,14 +390,13 @@ class PushForwardNode(Node):
             )
             return None
 
-        new_link6_pos, new_link6_orn = tip_pose(self.ik_robot, self.joint_indices, best_deg6)
         self.get_logger().warn(
             f"LEVEL 손목(joint4/5) 보정 계산(정지 확인 후): joint4 {baseline_deg6[j4_idx]:+.1f}"
             f"->{best_deg6[j4_idx]:+.1f}도, joint5 {baseline_deg6[j5_idx]:+.1f}->"
             f"{best_deg6[j5_idx]:+.1f}도, 예측 퍼짐 {baseline_spread*1000:.1f}mm->"
             f"{best_spread*1000:.1f}mm"
         )
-        return np.array(new_link6_pos), new_link6_orn
+        return best_deg6
 
     def _link6_is_settled(self) -> bool:
         """최근 LEVEL_SETTLE_WINDOW틱 동안 link6의 실제 TF 위치/방향이 거의 안 변했으면 True -
@@ -481,8 +492,7 @@ class PushForwardNode(Node):
                     "했는지 확인) ...", throttle_duration_sec=2.0)
                 return
             self._level_hold_count = 0
-            self._level_target_pos = None
-            self._level_target_orn = None
+            self._level_target_deg6 = None
             self._link6_pose_history.clear()
             self.state = STATE_LEVEL
             self._log_milestone("정렬(LEVEL) 시작 - 판을 벽과 평행하게 맞추는 중")
@@ -517,27 +527,22 @@ class PushForwardNode(Node):
                 if link6 is not None:
                     self._link6_pose_history.append((link6[0].copy(), link6[1]))
 
-                need_new_target = self._level_target_pos is None
+                need_new_target = self._level_target_deg6 is None
                 if not need_new_target and self._link6_is_settled():
                     need_new_target = True
 
                 if need_new_target:
                     level_target = self._compute_level_target()
                     if level_target is not None:
-                        self._level_target_pos, self._level_target_orn = level_target
+                        self._level_target_deg6 = level_target
                         self._link6_pose_history.clear()  # 새 스텝 시작 - 다시 정지 확인부터
-                    elif self._level_target_pos is None:
+                    elif self._level_target_deg6 is None:
                         return  # 최초 계산도 아직 안 됨(TF 문제 등) - 다음 tick 재시도
 
-                target = PoseStamped()
-                target.header.stamp = self.get_clock().now().to_msg()
-                target.header.frame_id = BASE_FRAME
-                target.pose.position.x, target.pose.position.y, target.pose.position.z = (
-                    float(v) for v in self._level_target_pos
-                )
-                (target.pose.orientation.x, target.pose.orientation.y,
-                 target.pose.orientation.z, target.pose.orientation.w) = self._level_target_orn
-                self.target_pub.publish(target)
+                # 2026-09-16: Cartesian(/piper/target_pose)이 아니라 관절각 직접 지정
+                # (/piper/target_joint_deg)으로 발행한다 - _compute_level_target 설명 참고.
+                self.joint_target_pub.publish(
+                    Float64MultiArray(data=[float(d) for d in self._level_target_deg6]))
                 return
 
         if self.state == STATE_PUSH:

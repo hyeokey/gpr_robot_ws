@@ -51,7 +51,7 @@ import rclpy  # noqa: E402
 from geometry_msgs.msg import PoseStamped  # noqa: E402
 from rclpy.node import Node  # noqa: E402
 from sensor_msgs.msg import JointState  # noqa: E402
-from std_msgs.msg import Float64  # noqa: E402
+from std_msgs.msg import Float64, Float64MultiArray  # noqa: E402
 
 from piper_motion import connect, enter_standby, read_deg  # noqa: E402
 from sim_view import (  # noqa: E402
@@ -125,6 +125,16 @@ IK_MARGIN_SWITCH_BENEFIT_DEG = 5.0  # 대안이 이만큼 더 나아야 분기 �
 # 여유를 두고 거부한다. 관절이 완전히 걸려버리는 것보단 안전하게 조금 더 허용하는 쪽으로
 # 판단했지만, 진짜 물리적 하드스톱 위치는 다음에 Piper 공식 스펙으로 재확인할 것.
 IK_HARD_LIMIT_SLACK_DEG = 8.0
+
+# 2026-09-16: push_forward_node의 LEVEL(joint4/5 grid search)처럼 "정확히 이 관절값으로
+# 가라"가 이미 결정된 호출자를 위해, Cartesian pose(/piper/target_pose)를 안 거치고 관절각을
+# 직접 받는 경로를 추가한다. 실측으로 확인된 문제: 원하는 관절값을 FK로 Cartesian pose를 만든
+# 다음 그걸 다시 solve_ik_best()에 넣으면, IK가 "그 pose에 도달하는 어떤 6관절 조합"을 자기
+# 시드 기준으로 다시 찾다 보니 요청하지 않은 관절(특히 joint2/3/6)까지 사이클마다 최대 0.9도씩
+# 미세하게 같이 틀어지는 게 실측 확인됨 - 작아 보여도 LEVEL처럼 그 관절들이 안 바뀐다고 가정하고
+# 매번 새 보정을 계산하는 폐루프에서는 이 드리프트가 누적되어 발산으로 이어졌다(joint4가
+# 계속 커지기만 하고 실측 퍼짐은 수렴 안 함). IK를 아예 안 거치면 이 드리프트 자체가 없어진다.
+JOINT_TARGET_EPS_DEG = 0.05  # 이 이내 변화는 노이즈로 무시(직접 관절각 지정 경로 전용)
 
 # 2026-09-15: quat_from_z_axis(contact_planner_node)가 만드는 목표 orientation은 접근축(로컬
 # Z, 벽 법선 방향)만 의미가 있고, 그 축 둘레 회전(roll)은 태스크상 자유도인데 임의의 최단회전
@@ -440,11 +450,19 @@ class PiperControllerNode(Node):
         # _publish_feedback의 오차 계산을 실제 명령과 일치시키기 위함(IK_ROLL_SWEEP_STEP_DEG 설명 참고)
         self._last_ik_reject_s = None  # IK 완전 실패로 거부한 마지막 시각(초) - IK_REJECT_RETRY_PERIOD_S 참고
 
+        self._latest_raw_joint_target = None  # ([deg]*6, stamp_sec) - /piper/target_joint_deg 최신값
+        self._accepted_joint_target = None  # 마지막으로 "실질적 변화"로 받아들인 직접-관절 목표(도)
+        self._active_joint_target_pose = None  # 위 accepted_joint_target을 FK로 변환한 (pos,orn,stamp) -
+        # _publish_feedback에 넘길 "target"용(Cartesian 경로의 target 튜플과 같은 모양으로 통일)
+
         self.ik_robot, self.joint_indices = load_ik_model()
         self.rest_pose = [0.0] * 8
 
         self.target_sub = self.create_subscription(
             PoseStamped, "/piper/target_pose", self._on_target_pose, 10
+        )
+        self.joint_target_sub = self.create_subscription(
+            Float64MultiArray, "/piper/target_joint_deg", self._on_target_joint_deg, 10
         )
         self.joint_state_pub = self.create_publisher(JointState, "/joint_states", 10)
         self.tip_pose_pub = self.create_publisher(PoseStamped, "/tip_pose", 10)
@@ -497,6 +515,18 @@ class PiperControllerNode(Node):
         with self._lock:
             self._latest_raw_target = (pos, orn, now_s)
 
+    def _on_target_joint_deg(self, msg: Float64MultiArray):
+        """관절각(도) 직접 지정 - Cartesian IK를 아예 안 거친다(JOINT_TARGET_EPS_DEG 설명
+        참고). push_forward_node의 LEVEL(joint4/5 grid search)처럼 정확한 관절값을 이미 알고
+        있는 호출자용."""
+        if len(msg.data) != 6:
+            self.get_logger().error(
+                f"/piper/target_joint_deg 메시지 길이가 6이 아님({len(msg.data)}) - 무시.")
+            return
+        now_s = self.get_clock().now().nanoseconds / 1e9
+        with self._lock:
+            self._latest_raw_joint_target = (list(msg.data), now_s)
+
     def _control_loop(self):
         if self._abort:
             return  # CAN 송신 실패가 감지되면 더 이상 명령을 내보내지 않는다
@@ -504,10 +534,33 @@ class PiperControllerNode(Node):
         now_s = self.get_clock().now().nanoseconds / 1e9
         with self._lock:
             target = self._latest_raw_target
+            joint_target = self._latest_raw_joint_target
 
+        # 2026-09-16: 직접-관절 목표(/piper/target_joint_deg)가 신선하면 그쪽을 우선한다(IK를
+        # 아예 안 거치는 게 그 경로의 핵심 목적이라 Cartesian 목표와 동시에 신선할 이유가
+        # 원래 없음 - 호출자가 둘 중 하나만 쓰도록 설계됨, push_forward_node 참고).
+        have_valid_joint_target = (
+            joint_target is not None and (now_s - joint_target[1]) <= TARGET_TIMEOUT_S)
         have_valid_target = target is not None and (now_s - target[2]) <= TARGET_TIMEOUT_S
-        if have_valid_target:
+
+        effective_target = None
+        if have_valid_joint_target:
+            effective_target = self._maybe_start_joint_ramp(joint_target, now_s)
+        elif have_valid_target:
             self._maybe_start_ramp(target, now_s)
+            # 2026-09-15: target의 orn을 그대로 쓰지 않고, 실제로 IK에 명령한 orn
+            # (_active_target_orn - roll 재시도가 있었으면 다름)으로 바꿔서 오차를 계산한다.
+            # 그래야 roll을 관절이 편한 쪽으로 바꿔치기했을 때도 /orientation_error_deg와
+            # "실제 도달 확인"이 실제 명령 기준으로 정확하게 나온다(원래 요청 그대로와
+            # 비교하면 roll 차이만큼 영원히 안 없어지는 오차가 남음). 지금 raw target이
+            # 마지막으로 accepted된 그 목표와 같을 때만 substitute한다 - 아직 accept 안 된
+            # (또는 거부된) 새 target이면 그냥 원본 그대로 비교한다.
+            effective_target = target
+            if (self._active_target_orn is not None
+                    and self._accepted_target is not None
+                    and math.dist(target[0], self._accepted_target[0]) < TARGET_POS_EPS_M
+                    and orientation_angle_diff_deg(target[1], self._accepted_target[1]) < TARGET_ORN_EPS_DEG):
+                effective_target = (target[0], self._active_target_orn, target[2])
 
         if self.ramp_end_deg is not None:
             elapsed = now_s - self.ramp_start_time
@@ -522,20 +575,7 @@ class PiperControllerNode(Node):
 
         mit_send(self.piper, [math.radians(d) for d in commanded_deg])
         self.current_deg = read_deg(self.piper)
-
-        # 2026-09-15: target의 orn을 그대로 쓰지 않고, 실제로 IK에 명령한 orn(_active_target_orn -
-        # roll 재시도가 있었으면 다름)으로 바꿔서 오차를 계산한다. 그래야 roll을 관절이 편한
-        # 쪽으로 바꿔치기했을 때도 /orientation_error_deg와 "실제 도달 확인"이 실제 명령 기준으로
-        # 정확하게 나온다(원래 요청 그대로와 비교하면 roll 차이만큼 영원히 안 없어지는 오차가 남음).
-        # 지금 raw target이 마지막으로 accepted된 그 목표와 같을 때만 substitute한다 - 아직
-        # accept 안 된(또는 거부된) 새 target이면 그냥 원본 그대로 비교한다.
-        effective_target = target
-        if (have_valid_target and self._active_target_orn is not None
-                and self._accepted_target is not None
-                and math.dist(target[0], self._accepted_target[0]) < TARGET_POS_EPS_M
-                and orientation_angle_diff_deg(target[1], self._accepted_target[1]) < TARGET_ORN_EPS_DEG):
-            effective_target = (target[0], self._active_target_orn, target[2])
-        self._publish_feedback(effective_target if have_valid_target else None)
+        self._publish_feedback(effective_target)
 
     def _maybe_start_ramp(self, target, now_s):
         """목표 거리/방향으로 거부하지 않는다(2026-09-04 2차 수정) - 대신 그 거리/방향 차이에
@@ -639,6 +679,67 @@ class PiperControllerNode(Node):
             f"관절한계여유={_joint_limit_margin_deg(sol):.1f}도",
             throttle_duration_sec=0.5,
         )
+
+    def _maybe_start_joint_ramp(self, joint_target, now_s):
+        """/piper/target_joint_deg로 직접 지정된 관절각(도)을 그대로 목표로 쓴다 - Cartesian
+        IK(solve_ik_best)를 아예 안 거친다(JOINT_TARGET_EPS_DEG 설명 참고 - IK를 한 번 더
+        거치면 요청 안 한 관절까지 미세하게 같이 틀어지는 게 실측 확인됨). 그 대신 관절한계
+        하드체크(IK_HARD_LIMIT_SLACK_DEG)는 Cartesian 경로와 동일하게 적용하고, 속도 상한
+        램프도 동일한 공식(Cartesian/관절공간 델타 중 더 오래 걸리는 쪽)을 그대로 쓴다 -
+        "IK를 안 푼다"는 것 말고는 안전 특성이 Cartesian 경로와 다르지 않다.
+
+        리턴값은 _publish_feedback에 그대로 넘길 (pos, orn, stamp) - Cartesian 경로의 target
+        튜플과 같은 모양으로 통일해서 tracking_error/orientation_error_deg/도달 판정이 두
+        경로 모두에서 똑같이 동작하게 한다. 거부되거나 사실상 같은 목표면 이전 값을 그대로
+        리턴(아직 아무것도 받아들인 적 없으면 None)."""
+        target_deg6, _ = joint_target
+
+        if self._accepted_joint_target is not None:
+            prev_deg6 = self._accepted_joint_target
+            if max(abs(a - b) for a, b in zip(target_deg6, prev_deg6)) < JOINT_TARGET_EPS_DEG:
+                return self._active_joint_target_pose  # 사실상 같은 목표 - 아무것도 안 함
+
+        margin = _joint_limit_margin_deg([math.radians(d) for d in target_deg6] + [0.0, 0.0])
+        if margin < -IK_HARD_LIMIT_SLACK_DEG:
+            self.get_logger().error(
+                f"/piper/target_joint_deg 요청이 관절한계를 슬랙({IK_HARD_LIMIT_SLACK_DEG:.0f}도)"
+                f"보다 많이 벗어남(여유 {margin:.1f}도) - 거부합니다.",
+                throttle_duration_sec=1.0,
+            )
+            return self._active_joint_target_pose
+
+        self._accepted_joint_target = target_deg6
+        self.rest_pose = [math.radians(d) for d in target_deg6] + [0.0, 0.0]
+
+        tip_pos, tip_orn = tip_pose(self.ik_robot, self.joint_indices, self.current_deg)
+        target_pos, target_orn = tip_pose(self.ik_robot, self.joint_indices, target_deg6)
+        pos_delta_m = math.dist(target_pos, tip_pos)
+        orn_delta_deg = orientation_angle_diff_deg(target_orn, tip_orn)
+
+        joint_deltas_deg = [b - a for a, b in zip(self.current_deg, target_deg6)]
+        max_joint_idx = max(range(len(joint_deltas_deg)), key=lambda i: abs(joint_deltas_deg[i]))
+        max_joint_delta_deg = abs(joint_deltas_deg[max_joint_idx])
+
+        self.ramp_start_deg = self.current_deg
+        self.ramp_end_deg = target_deg6
+        self.ramp_start_time = now_s
+        self.ramp_duration_s = max(
+            1e-2,
+            pos_delta_m / MAX_LINEAR_SPEED_M_S,
+            orn_delta_deg / MAX_ANGULAR_SPEED_DEG_S,
+            max_joint_delta_deg / MAX_JOINT_SPEED_DEG_S,
+        )
+        self._arrival_logged = False
+        self._arrival_hold_count = 0
+        self._active_joint_target_pose = (target_pos, target_orn, now_s)
+        self.get_logger().info(
+            f"새 관절목표(직접 지정, IK 안 거침) - 위치차 {pos_delta_m * 100:.1f}cm, "
+            f"방향차 {orn_delta_deg:.1f}도, 램프 {self.ramp_duration_s:.1f}초, "
+            f"최대관절차 J{max_joint_idx + 1}={joint_deltas_deg[max_joint_idx]:+.1f}도 "
+            f"관절한계여유={margin:.1f}도",
+            throttle_duration_sec=0.5,
+        )
+        return self._active_joint_target_pose
 
     def _publish_feedback(self, target):
         stamp = self.get_clock().now().to_msg()
