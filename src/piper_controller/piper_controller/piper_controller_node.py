@@ -200,19 +200,42 @@ def solve_ik(ik_robot, joint_indices, rest_pose, target_pos, target_orn):
 # joint1을 CANONICAL_REACH_JOINT1_DEG 간격으로 훑은 여러 개를 전부 시드로 준다 - 같은 "팔 뻗은"
 # 팔꿈치 모양이지만 몸을 어느 쪽으로 돌리고 뻗을지 다양하게 제시하는 셈.
 CANONICAL_REACH_JOINT1_DEG = [-120.0, -60.0, 0.0, 60.0, 120.0]
-CANONICAL_REACH_ELBOW_DEG = [90.0, -90.0]  # joint2, joint3
+# 2026-09-17 실측 확인된 버그: 팔꿈치 모양이 (90,-90) 딱 하나뿐이라, base_link에서 ~0.7m(팔의
+# 도달범위 경계 근처) 떨어진 실제 목표에서 "IK 완전 실패"가 재현됐다. 원인 조사(joint1을 1도
+# 간격으로 360개 전부 훑어도 이 (90,-90) 모양으로는 최선이 위치오차 51mm - IK_POS_TOL_M(20mm)을
+# 못 넘음)로 "틀린 joint1"이 아니라 "이 팔꿈치 모양 자체가 이 먼 목표엔 구조적으로 안 닿는다"는
+# 게 확인됐다. 훨씬 더 편(거의 다 뻗은) 팔꿈치 모양 (45,-135)로 바꾸면 같은 목표가 위치오차
+# 14.5mm/방향오차 0.07도/관절여유 11.1도로 production IK 기준(IK_POS_TOL_M/IK_ORN_TOL_DEG)을
+# 그대로 통과함 - 팔이 실제로 갈 수 있는 목표를 시드 다양성 부족으로 "도달 불가"로 오판하고
+# 있었던 것. 여러 팔꿈치 모양 x 여러 joint1 조합을 전부 시드로 준다(적당히 굽힌 모양은 가까운
+# 목표에, 거의 다 뻗은 모양은 먼 목표에 필요).
+CANONICAL_REACH_ELBOW_SHAPES_DEG = [
+    (90.0, -90.0),    # 적당히 굽힌 모양 - 기존 기본값, 중간 거리 목표에 잘 맞음
+    (45.0, -135.0),   # 거의 다 뻗은 모양 - 도달범위 경계 근처 먼 목표용(위 설명 참고)
+]  # (joint2, joint3) 쌍
 
 
 def _canonical_reach_seeds(pose_len):
-    """CANONICAL_REACH_JOINT1_DEG 각 값 x 고정 팔꿈치 모양(CANONICAL_REACH_ELBOW_DEG)의 "팔
-    뻗은" 시드들 - 현재/이전 자세와 무관하게 항상 같은 후보를 제시한다(_ik_alt_seeds/
-    _recover_via_roll_sweep 양쪽에서 재사용)."""
+    """CANONICAL_REACH_ELBOW_SHAPES_DEG(팔꿈치 모양) x CANONICAL_REACH_JOINT1_DEG(몸통 회전)
+    조합 전부를 "팔 뻗은" 시드로 준다 - 현재/이전 자세와 무관하게 항상 같은 후보를 제시한다
+    (_ik_alt_seeds/_recover_via_roll_sweep 양쪽에서 재사용). _canonical_reach_labels()와
+    반드시 같은 순서로 순회해야 한다(solve_ik_best 로그의 라벨이 실제 시드와 맞도록)."""
     seeds = []
-    for j1_deg in CANONICAL_REACH_JOINT1_DEG:
-        deg6 = [j1_deg, CANONICAL_REACH_ELBOW_DEG[0], CANONICAL_REACH_ELBOW_DEG[1], 0.0, 0.0, 0.0]
-        seed = [math.radians(d) for d in deg6] + [0.0] * (pose_len - 6)
-        seeds.append(seed)
+    for j2_deg, j3_deg in CANONICAL_REACH_ELBOW_SHAPES_DEG:
+        for j1_deg in CANONICAL_REACH_JOINT1_DEG:
+            deg6 = [j1_deg, j2_deg, j3_deg, 0.0, 0.0, 0.0]
+            seed = [math.radians(d) for d in deg6] + [0.0] * (pose_len - 6)
+            seeds.append(seed)
     return seeds
+
+
+def _canonical_reach_labels():
+    """_canonical_reach_seeds()와 정확히 같은 순서의 라벨(solve_ik_best 로그 표시용)."""
+    return [
+        f"canonical_reach_j1={j1_deg:+.0f}_elbow({j2_deg:.0f},{j3_deg:.0f})"
+        for j2_deg, j3_deg in CANONICAL_REACH_ELBOW_SHAPES_DEG
+        for j1_deg in CANONICAL_REACH_JOINT1_DEG
+    ]
 
 
 def _ik_alt_seeds(primary_rest_pose):
@@ -284,8 +307,7 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
     if primary_ok and primary_margin >= IK_MARGIN_DANGER_DEG:
         return primary_sol  # 이미 충분히 안전 - 대안 탐색 안 함(연속성 유지)
 
-    alt_labels = ["elbow_flip", "wrist_flip", "neutral"] + [
-        f"canonical_reach_j1={j1_deg:+.0f}" for j1_deg in CANONICAL_REACH_JOINT1_DEG]
+    alt_labels = ["elbow_flip", "wrist_flip", "neutral"] + _canonical_reach_labels()
 
     best_sol, best_margin, best_label = primary_sol, primary_margin, "primary"
     any_converged = primary_ok
