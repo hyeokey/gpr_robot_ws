@@ -156,11 +156,63 @@ IK_ROLL_NEAR_BEST_MARGIN_DEG = 2.0  # 최선 관절여유 대비 이 이내 후�
 # 재시도할 필요 없이 이 주기로만 다시 시도한다.
 IK_REJECT_RETRY_PERIOD_S = 0.5
 
+# 2026-09-17 (사용자 설계): MIT 저수준 PD(kp=10)의 정상상태 오차(중력 부하 - 2026-09-16 세션
+# 4번 항목 실측: grid search가 안 건드린 joint6도 명령값과 실제값이 1.7~3도 차이남) 개선용
+# 적분(I) feedforward. 중력모델로 토크를 계산하는 게 아니라 "목표에 도달해 정지한 뒤" 남는
+# 위치오차를 적분해서, mit_send()가 지금까지 항상 0.0으로 고정 전송하던 t_ref(마지막 인자)에
+# 얹는다 - PD 자체(kp/kd)는 그대로 두고 그 옆 채널에 소프트웨어 적분만 추가하는 것.
+#
+# ⚠️ 아직 실물 미검증 실험 기능 - 기본 OFF(ENABLE_I_TERM=False, KI 전부 0.0). 사용자 지정
+# 검증 순서: 1) 고정 자세에서 joint4/5 딱 하나씩만 KI_NM_PER_RAD_S를 채워 켜고 안정성 확인
+# (작은 Ki/작은 I_TORQUE_LIMIT_NM부터) 2) 나머지 관절은 Ki=0 유지 3) 안정성 확인 후에만
+# 다른 관절이나 PUSH 같은 실제 이동 시나리오로 확대 검토할 것.
+# 2026-09-17 1차 실물 시험(사용자 설계): joint4 하나만, 작은 Ki/작은 출력 한계로 우선 검증.
+# PUSH는 여전히 ENABLE_PUSH=False(push_forward_node)라 이동 없이 LEVEL 정지 자세에서만 시험.
+# 1차(±0.2Nm) 결과: t_ref가 정확히 +방향으로 증가해 상한에서 포화, J4도 목표 쪽으로 소폭
+# 이동(오차 2.581->2.465도) - 방향/메커니즘은 맞으나 상한 용량 부족으로 모서리 퍼짐(23.2mm)은
+# 아직 못 줄임. 2차(±0.4Nm) 결과: 다시 포화(오차 2.065도까지 개선, 퍼짐 23.2->22.0mm로 처음
+# 감소 확인) - 여전히 포화라 용량 부족 지속. 정상상태에서 P토크(Kp*오차)+I토크가 함께 중력을
+# 버티는 구조라, 2차 시점 오차 2.065도(~0.036rad) 기준 P토크≈Kp*0.036≈0.36Nm + I토크 0.4Nm
+# ≈0.76Nm가 이 자세의 대략적 중력부하 추정치 - 그래서 한 번에 0.8로 안 가고 0.6으로 먼저 인상.
+# Ki(쌓이는 속도)는 그대로 두고 상한만 0.4->0.6으로 인상.
+ENABLE_I_TERM = True
+# 2026-09-17 J2/J3 시험(사용자 설계): J4는 검증 완료(1.0Nm)로 그대로 유지. J2는 0.2Nm 즉시
+# 포화 확인 후 1.0Nm로 인상(J4도 결국 1.0Nm대까지 필요했으니 단계 생략). PUSH/HOLD로 벽 근처에
+# 있는 상태에서 J2/J4 둘 다 ±1.0Nm 근처에서 포화되며 오차가 안 줄어드는 게 실측됨 - 중력이
+# 아니라 벽 접촉저항 때문일 가능성이 높다고 판단(이 노드가 접촉 여부를 모르는 기존 한계,
+# ENABLE_I_TERM 설명 상단 참고). 그 상태에서 J3도 동일하게 1.0Nm로 추가 시험(사용자 판단).
+KI_NM_PER_RAD_S = [0.0, 1.0, 1.0, 0.2, 0.0, 0.0]  # joint2/joint3: 0.5로 이미 수렴 확인(J2
+# 0.14도, J3 0.04~0.17도) - 수렴속도를 한 번 더 인상(0.5->1.0), joint4는 그대로
+I_TORQUE_LIMIT_NM = [0.0, 2.5, 2.0, 1.0, 0.0, 0.0]  # joint2: 2.0Nm에서 정확히 포화(오차
+# -0.327도 안 줄어듦) 실측 확인 - 2.5Nm로 인상. joint3는 아직 2.0Nm 안 찼으니 그대로 유지.
+# 문턱을 넘는지 확인(사용자 판단, 정격 미확인 구간이라 주의 관찰 필요). joint4 t_ref 상한
+# ±1.0Nm(0.8Nm도 포화 확인
+# 후 마지막 인상 - 오차 0.714도 시점 추정치 0.8+10*rad(0.714도)≈0.925Nm, 마찰/게인 오차
+# 감안해 1.0Nm까지. J4는 이걸로 마지막 - 남은 오차를 0으로 없애도 퍼짐이 13~14mm 정도
+# 남을 것으로 예상(J4 오차감소 0.458도당 퍼짐감소 1.7mm 추세 기준) - 그러면 J2/J3/J5의
+# 목표-실제 오차를 봐야 한다(더 이상 J4 상한을 올리지 않음).
+I_TERM_LIMIT_MARGIN_DEG = 5.0  # 관절 실제각이 한계에서 이 이내로 들어왔을 때의 판정 여유(도)
+# 2026-09-17 실물 시험 중 실측 확인된 버그 수정(사용자 지적, 2단계):
+# 1차: 오차 방향과 무관하게 동결 -> 한계 쪽으로 처진 관절이 "한계에서 멀어지는" 안전한 방향
+# 오차까지 막혀버림(J4가 하한을 넘어 처졌는데 목표는 하한에서 멀어지는 방향인데도 t_ref가 0에
+# 고정) - "한계에 더 파고드는 방향일 때만 차단"으로 1차 수정.
+# 2차: 그 차단을 "적분 전체 리셋(0)"으로 했더니, 목표 근처에서 오차가 살짝 음수로 넘어가는
+# 순간(정상적인 오버슈트/진동) 그동안 쌓아온 중력보상 토크가 통째로 사라져 다시 처지고 다시
+# 적분되는 걸 반복하는 채터링 위험이 있음(실측 전 사전 지적) - "한계 방향의 토크만 금지"로
+# 완화(_update_i_term 참고): integral 자체가 그 부호를 못 넘게만 클램프해서, 반대 부호로 이미
+# 쌓인 중력보상 토크는 그대로 유지된다.
+# ⚠️ 미구현: "벽 접촉 후 적분 중단" - 이 노드는 벽 접촉 여부를 모른다(그 신호는
+# contact_planner_node/push_forward_node 쪽에 있음). PUSH처럼 실제로 벽을 미는 상황과
+# 같이 쓰려면 그 신호를 이 노드로 끌어와 반드시 먼저 연결할 것 - 안 그러면 접촉 후에도
+# 계속 적분이 쌓여 벽을 미는 토크가 계속 커질 수 있음.
 
-def mit_send(piper, target_rad, kp=KP, kd=KD):
+
+def mit_send(piper, target_rad, torque_ff=None, kp=KP, kd=KD):
+    if torque_ff is None:
+        torque_ff = [0.0] * 6  # 기존 호출부(anchor/홈 복귀 램프)는 그대로 토크 0 - 동작 안 바뀜
     piper.MotionCtrl_2(0x01, 0x04, 0, 0xAD)  # ctrl_mode=CAN, move_mode=MOVE M, is_mit_mode=MIT
-    for motor_num, pos_ref in enumerate(target_rad, start=1):
-        piper.JointMitCtrl(motor_num, pos_ref, 0.0, kp, kd, 0.0)
+    for motor_num, (pos_ref, t_ref) in enumerate(zip(target_rad, torque_ff), start=1):
+        piper.JointMitCtrl(motor_num, pos_ref, 0.0, kp, kd, t_ref)
 
 
 def solve_ik(ik_robot, joint_indices, rest_pose, target_pos, target_orn):
@@ -455,6 +507,9 @@ class PiperControllerNode(Node):
         self._active_joint_target_pose = None  # 위 accepted_joint_target을 FK로 변환한 (pos,orn,stamp) -
         # _publish_feedback에 넘길 "target"용(Cartesian 경로의 target 튜플과 같은 모양으로 통일)
 
+        self.integral_error_rad = [0.0] * 6  # I항 적분 상태(관절별, rad·s) - ENABLE_I_TERM 설명 참고
+        self.i_torque_nm = [0.0] * 6  # 위 적분에 KI_NM_PER_RAD_S를 곱하고 클램프한 최종 t_ref(Nm)
+
         self.ik_robot, self.joint_indices = load_ik_model()
         self.rest_pose = [0.0] * 8
 
@@ -562,6 +617,7 @@ class PiperControllerNode(Node):
                     and orientation_angle_diff_deg(target[1], self._accepted_target[1]) < TARGET_ORN_EPS_DEG):
                 effective_target = (target[0], self._active_target_orn, target[2])
 
+        ramp_complete = False
         if self.ramp_end_deg is not None:
             elapsed = now_s - self.ramp_start_time
             alpha = min(1.0, elapsed / self.ramp_duration_s)
@@ -570,12 +626,85 @@ class PiperControllerNode(Node):
             # "도달 완료" 로그는 여기(램프 alpha)가 아니라 _publish_feedback()의 실제 오차 기반
             # 판정(ANGLE_ARRIVAL_TOL_DEG/POS_ARRIVAL_TOL_M)에서 낸다 - 보간이 끝났다고 실제로
             # 그 자리에 도달했다는 보장은 없음(MIT는 PD 추종, gpr_robot/CLAUDE.md MIT 모드 참고).
+            ramp_complete = alpha >= 1.0  # I항(_update_i_term)이 "이동 중이 아님"을 판단하는 기준
         else:
             commanded_deg = self.current_deg  # 유효한 목표가 없음 - 제자리 유지
 
-        mit_send(self.piper, [math.radians(d) for d in commanded_deg])
+        self._update_i_term(commanded_deg, ramp_complete)
+
+        mit_send(self.piper, [math.radians(d) for d in commanded_deg], torque_ff=self.i_torque_nm)
         self.current_deg = read_deg(self.piper)
         self._publish_feedback(effective_target)
+
+    def _update_i_term(self, commanded_deg, ramp_complete):
+        """ENABLE_I_TERM 실험 기능(2026-09-17, 사용자 설계) - mit_send()의 t_ref에 얹을 관절별
+        적분(I) 토크(self.i_torque_nm)를 갱신한다. 램프 이동 중에는 새로 적분하지 않는다 -
+        "목표까지 이동"은 MIT PD + 속도상한 램프가 전담하고, 이 I항은 오직 "이미 도달해 정지한
+        뒤" 중력 등으로 남는 정상상태 오차만 제거하는 용도다(이동 중 오차까지 적분하면 그 시점의
+        큰 과도오차가 그대로 쌓여 위험한 토크로 이어질 수 있음).
+
+        2026-09-17 PUSH 연동을 위한 수정(사용자 설계): 처음엔 ramp_complete=False일 때 매번
+        전부 리셋했는데, PUSH(push_forward_node)처럼 이미 도달한 자세에서 아주 작은(5mm)
+        Cartesian 스텝을 반복하는 경우, 스텝마다 짧게 걸리는 램프 동안 그동안 쌓아온 중력보상
+        I토크가 통째로 사라졌다가 다시 쌓이기를 반복하면 그 사이 판이 다시 처져서 정렬이
+        풀릴 위험이 있다. 이제 이동 중에는 "새로 적분하지 않을 뿐" 리셋도 안 한다 - 직전에
+        쌓아둔 i_torque_nm을 그대로 유지한 채 이동한다. ENABLE_I_TERM 자체가 꺼질 때만 전부
+        리셋한다(관절 한계 근접/방향에 따른 부분 리셋은 아래 루프의 근접 처리와 별개)."""
+        if not ENABLE_I_TERM:
+            self.integral_error_rad = [0.0] * 6
+            self.i_torque_nm = [0.0] * 6
+            return
+        if not ramp_complete:
+            return  # 이동 중 - 새로 적분하지 않지만, 기존 i_torque_nm(중력보상)은 유지한다
+
+        dt = 1.0 / CONTROL_HZ
+        active_joints = []
+        for i in range(6):
+            ki = KI_NM_PER_RAD_S[i]
+            if ki == 0.0:
+                self.integral_error_rad[i] = 0.0
+                self.i_torque_nm[i] = 0.0
+                continue
+
+            error_rad = math.radians(commanded_deg[i] - self.current_deg[i])
+            lower_deg = math.degrees(IK_LOWER[i])
+            upper_deg = math.degrees(IK_UPPER[i])
+            current_deg = self.current_deg[i]
+            near_lower = current_deg <= lower_deg + I_TERM_LIMIT_MARGIN_DEG
+            near_upper = current_deg >= upper_deg - I_TERM_LIMIT_MARGIN_DEG
+
+            self.integral_error_rad[i] += error_rad * dt
+            # anti-windup: 출력 한계에 대응하는 값으로 integral 자체를 클램프한다(출력만 클램프
+            # 하면 막힌 동안에도 integral이 계속 커져서, 오차가 반대로 바뀐 뒤 되돌아오는 데
+            # 오래 걸리는 고전적 와인드업 문제가 생김).
+            integral_limit = I_TORQUE_LIMIT_NM[i] / ki
+            self.integral_error_rad[i] = max(
+                -integral_limit, min(integral_limit, self.integral_error_rad[i]))
+
+            # 2026-09-17 2차 수정(사용자 설계): 처음엔 "한계에 더 파고드는 방향이면 전부
+            # 리셋(0)"이었는데, 그러면 목표 근처에서 오차가 살짝 음수로 넘어가는 순간(정상적인
+            # 진동/오버슈트) 그동안 쌓아온 중력보상 토크가 통째로 사라져서 다시 처지고, 다시
+            # 적분되고, 다시 넘어가고... 하는 떨림(chattering)이 생길 수 있다. 그 대신 "한계
+            # 방향의 토크만 금지"로 완화 - integral 자체를 그쪽 부호로 못 넘어가게만 막아서,
+            # 이미 쌓인 중력보상 토크(반대 부호)는 그대로 유지된다.
+            if near_lower:
+                self.integral_error_rad[i] = max(0.0, self.integral_error_rad[i])  # 하한 근처 - 음의 토크 금지
+            elif near_upper:
+                self.integral_error_rad[i] = min(0.0, self.integral_error_rad[i])  # 상한 근처 - 양의 토크 금지
+
+            self.i_torque_nm[i] = ki * self.integral_error_rad[i]
+            active_joints.append(i)
+
+        if active_joints:
+            self.get_logger().info(
+                "I항: " + " ".join(
+                    f"J{i + 1}(목표{commanded_deg[i]:+.2f}/실제{self.current_deg[i]:+.2f}/"
+                    f"오차{commanded_deg[i] - self.current_deg[i]:+.3f}도/"
+                    f"t_ref{self.i_torque_nm[i]:+.3f}Nm)"
+                    for i in active_joints
+                ),
+                throttle_duration_sec=1.0,
+            )
 
     def _maybe_start_ramp(self, target, now_s):
         """목표 거리/방향으로 거부하지 않는다(2026-09-04 2차 수정) - 대신 그 거리/방향 차이에

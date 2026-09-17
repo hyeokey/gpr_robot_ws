@@ -103,14 +103,23 @@ TF_LOOKUP_TIMEOUT_S = 0.0  # 0(즉시 반환) - contact_planner_node와 동일�
 
 PUSH_STEP_M = 0.005  # tick마다 앞으로 미는 거리(0.5cm)
 PUSH_STEP_PERIOD_S = 0.5  # 그 tick 주기(초)
-MAX_PUSH_DISTANCE_M = 0.05  # 2026-09-11: 3cm 첫 검증(판 안 기울고 평행 이동) 통과 후 10cm로 확대.
-# 2026-09-15: LEVEL 단계 추가 후 다시 5cm로 낮춤(사용자 요청) - LEVEL이 아직 실측 검증 중이라 보수적으로.
+# 2026-09-17 (사용자 설계): J4 I항(piper_controller_node의 ENABLE_I_TERM) 검증 완료 후 PUSH
+# 첫 실물 시험 - 2cm 시험 결과 정상 확인(판 자세 유지, 벽 법선 방향 이동, 안전 상한에서
+# 정상 정지). LEVEL_SPREAD_TOL_M 완화(15mm)로 인한 잔여 기울기 때문에 한쪽 모서리가 계속
+# 뜨는 건 PUSH가 orientation을 고정한 채 순수 평행이동만 해서 생기는 기하학적 결과(모든
+# 점이 같은 변위만큼 이동하므로 캡처 시점 퍼짐이 그대로 유지됨) - 더 밀어도 안 좁혀짐,
+# 확인됨. 2cm -> 5cm로 안전 상한 인상(사용자 확인). 5cm 시험도 정상(J2/J3/J4 I항 튜닝 완료
+# 후 판이 더 고르게 접근 - invalid_frac이 64%->98%로 점진적으로 증가, HOLD도 안정적) 확인 후
+# 5cm -> 10cm로 추가 인상했다가, 10cm는 아직 실측 전이라 사용자 판단으로 6cm로 조정.
+MAX_PUSH_DISTANCE_M = 0.06
 
 # 2026-09-15: 사용자 요청으로 LEVEL(정렬)까지만 검증하고 PUSH(이동)는 아직 하지 않는다 -
 # joint6이 한계 근처로 몰리는 문제를 조사 중이라, 이동까지 겹쳐서 변수를 늘리지 않고 정렬
 # 단계 자체(피벗 계산, 도달 게이팅, 관절 여유 등)만 따로 실측하려는 목적. False면 LEVEL
 # 완료(_try_capture() 성공) 후 PUSH 대신 바로 HOLD로 가서 그 정렬된 자세를 유지만 한다.
-ENABLE_PUSH = False
+# 2026-09-17: LEVEL 정렬(모서리 퍼짐 12.1mm, 판 폭 30cm 기준 약 2.3도 기울기)과 J4 I항 검증이
+# 끝나 PUSH를 켠다(사용자 판단 - J2/J3 잔차까지 지금 더 줄이려 하지 않고 실제 PUSH 여부부터 확인).
+ENABLE_PUSH = True
 
 CONTACT_IMAGE_TOPIC = "/lidar_2/scan_image"  # 자동 정지엔 더 이상 안 쓰고, 로그 참고용으로만 구독
 
@@ -126,7 +135,12 @@ STATE_PUSH = "PUSH"
 STATE_HOLD = "HOLD"
 
 # 2026-09-15 LEVEL 단계 (모듈 docstring 참고).
-LEVEL_SPREAD_TOL_M = 0.003  # 4개 모서리 거리 퍼짐(최대-최소)이 이 이내면 "평평해짐"
+LEVEL_SPREAD_TOL_M = 0.015  # 4개 모서리 거리 퍼짐(최대-최소)이 이 이내면 "평평해짐"
+# 2026-09-17: 3mm는 J2/J3 정상상태 오차(-1.9도/-1.1도, joint4/5 grid search가 못 건드리는
+# 관절들) 때문에 실측 퍼짐이 12mm 근처에서 막혀 영원히 못 넘김(예측 퍼짐은 2.2mm로 이미
+# 최선이라고 판단하는데 실제론 그만큼 안 줄어듦) - 첫 PUSH 시험 목적으로 실측치(12mm)보다
+# 넉넉하게 15mm로 완화(사용자 판단, "초기 PUSH 시험엔 충분히 평행"). J2/J3 I항 보정을 하기
+# 전까지의 임시 조치.
 LEVEL_HOLD_TICKS = 3  # 노이즈 한 틱으로 오판 안 하게 연속으로 이만큼 유지돼야 확정 (TICK=PUSH_STEP_PERIOD_S)
 
 # 2026-09-15 실측 사고 대응 + 재설계 이력: 처음엔 "판 전체를 피벗 기준으로 회전시키는 Cartesian
@@ -358,7 +372,19 @@ class PushForwardNode(Node):
         if self._corner_offsets_link6 is None and not self._capture_corner_offsets():
             return None
 
-        baseline_deg6 = list(self.current_joint_deg)
+        # 2026-09-17 실측 확인된 버그(사용자 지적): baseline을 self.current_joint_deg(MIT PD의
+        # 실제 피드백값)로 잡으면, joint1/2/3/6이 "그대로 둔다"고 주장하면서도 매 사이클 그
+        # 실제값(중력 부하로 처진 값 포함)을 새 기준으로 다시 채택해버린다 - 목표각 자체가
+        # 계속 조금씩 밀리는 셈이라, 나중에 이 baseline 위에서 정상상태 오차를 측정/보정하려는
+        # 어떤 시도(I항 feedforward 등)도 "고정된 목표"라는 전제가 깨져서 무의미해진다. 이전에
+        # 이미 계산해서 명령해둔 목표(self._level_target_deg6)가 있으면 그걸 baseline으로 쓴다 -
+        # 그래야 joint1/2/3/6이 사이클과 무관하게 진짜로 고정되고(오직 joint4/5만 grid search로
+        # 바뀜), PD 추종오차를 이 고정된 목표 기준으로 일관되게 측정할 수 있다. 아직 목표를 한
+        # 번도 계산한 적 없는 최초 1회(LEVEL 진입 직후)만 실제값에서 시작한다.
+        baseline_deg6 = (
+            list(self._level_target_deg6) if self._level_target_deg6 is not None
+            else list(self.current_joint_deg)
+        )
         baseline_spread = self._predicted_spread(baseline_deg6)
 
         deltas = np.arange(-WRIST_MAX_DELTA_DEG, WRIST_MAX_DELTA_DEG + 1e-6, WRIST_SEARCH_STEP_DEG)

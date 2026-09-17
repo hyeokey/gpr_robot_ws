@@ -138,9 +138,14 @@ def launch_setup(context, *args, **kwargs):
         # 2026-09-15: lpf_alpha=0.3 - 픽셀별 EMA로 프레임 간 노이즈 완화(lidar_pointcloud_correction.py
         # docstring 참고). ros2 param set /lidar1_pointcloud_correction lpf_alpha <값>으로 재시작 없이 튜닝 가능.
         # 2026-09-16: rviz로 포인트클라우드가 살짝 틀어져 보여 pitch_deg=-2.0으로 회전 보정 추가(실측 확정).
+        # 2026-09-17: pitch_deg 재실측 후 -3.5로 재조정. dx도 줄자 재실측 결과 -0.038 -> -0.07 ->
+        # -0.10으로 재조정(실측 캘리브레이션 보정 - 팔 도달범위 문제 우회용 아님, 사용자 확인함).
+        # 이후 -0.10 -> -0.13으로 3cm 추가 재조정(사용자 확인). -0.13 -> -0.14로 1cm 추가 재조정.
+        # -0.14 -> -0.08로 6cm 뒤로 재조정(사용자 확인). -0.08 -> -0.065로 1.5cm 추가 재조정.
+        # -0.065 -> -0.075로 1cm 다시 앞으로 재조정.
         _correction_node('lidar1_pointcloud_correction',
-                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.038,
-                          pitch_deg=-2.0, lpf_alpha=0.3),
+                          '/lidar_1/scan_3D_raw', '/lidar_1/scan_3D', dx=-0.075,
+                          pitch_deg=-3.5, lpf_alpha=0.3),
     ]
 
     if len(ports) > 1:
