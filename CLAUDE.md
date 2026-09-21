@@ -605,3 +605,160 @@ view_piper_lidar.launch.py:
 4. **`joint_state_bridge.py`의 DDS 유령 대응 로직 견고화** - 위 4번 항목, 반복 재발 중.
 5. **엘보 시드 다양성 수정 재적용 여부 판단** - 위 1번 항목, 유효한 수정이었으나 되돌려둔
    상태.
+
+---
+
+## 2026-09-21 작업 기록
+
+### 0. `tunnel_hil_sim` Gazebo HIL 환경 신규 구축 (커밋 `ba6cbe6`)
+
+기존 실물 전용 파이프라인과 별개로, Gazebo에서 실제 `/joint_states`를 미러링하는 HIL(Hardware-
+in-the-Loop) 시뮬레이션 패키지를 새로 만듦 - 목적은 "인식(perception)은 시뮬레이션, 구동
+(actuation)은 실물"을 분리해서 위험한 실물 시험 전에 파이프라인을 먼저 검증하는 것.
+
+- **`piper_hil_builder.py`**: 실물 URDF를 파싱해 `package://` 메쉬 경로를 `file://` 절대경로로
+  재작성(Gazebo가 못 찾던 문제 해결), 파란색 이동 플랫폼(`platform_lateral_joint`: Y축
+  prismatic ±4m, `platform_lift_joint`: Z축 prismatic 0.5~7m) 삽입, 터널 선로(레일/침목/
+  ballast) 제거.
+- **TF 분리 실측 버그 발견/수정**: `robot_state_publisher`/`tf2_ros`의 `TransformBroadcaster`는
+  노드 네임스페이스를 무시하고 항상 절대경로 `/tf`,`/tf_static`에 발행한다는 걸 몰라서, Gazebo용과
+  RViz용 두 발행자가 같은 토픽에 같은 프레임을 동시에 발행 중이었음(`TF_OLD_DATA` 경고로 확인) -
+  `("/tf","/sim/tf")`,`("/tf_static","/sim/tf_static")` remap으로 해결. 이후 실물/RViz는
+  `/tf`,`/tf_static`, Gazebo는 `/sim/tf`,`/sim/tf_static`으로 완전히 분리 유지.
+- **`piper_platform_gui`(신규 ament_cmake 패키지)**: Gazebo GUI 도킹 패널에 뜨는 gz-gui8 C++/QML
+  플러그인 - Y/Z 슬라이더+숫자입력+Apply/Center/Reset, 내부 rclcpp 노드로 `platform_control_node`
+  파라미터(`target_y`/`target_z`)를 설정. 삽질: AUTOMOC이 QML C++ 헤더를 소스 목록에 안 넣으면
+  vtable이 안 만들어짐(`add_library`에 헤더 추가) + `CMP0100` OLD 정책이 `.hh`를 AUTOMOC에서
+  제외(`cmake_policy(SET CMP0100 NEW)`) + QML에서 플러그인 프로퍼티는 `PiperPlatformGui.targetY`처럼
+  클래스명으로 qualify해야 함.
+- **`platform_control_node`**: Y/Z 목표를 매 tick 재발행 + clamp(범위 밖 입력 시 자동 clamp) +
+  충돌/한계 감지 로그(`requested=... actual=... error=...`, 실측 차이가 계속 나면 WARN) -
+  실물 명령 토픽은 전혀 발행 안 함(전부 `/sim/platform_*_controller/commands`).
+- **안전 조건 검증**: 코드 전체에 `/piper/target_pose`/`piper_controller_node`/CAN 참조 없음
+  (grep 확인), 실물 `/joint_states`는 구독만 함, `piper_joint_state_bridge`는 안 건드림.
+
+### 1. `tunnel_wall_detector` 패키지 신규 생성 (perception-only, 아직 미커밋)
+
+사용자 요청("LiDAR 포인트클라우드에서 벽을 찾고 목표점을 RViz에 찍는 기능부터, 로봇팔 자동 제어
+없이")에 따라, 기존 `contact_planner_node`(실물 전용, ALIGN/LOCK 상태머신)와 완전히 분리된 새
+패키지를 만듦 - 알고리즘/공식(quat_from_z_axis, SVD 평면 피팅, 수평 필터)은 재사용하되 구현은
+numpy로 새로 작성(venv 없이 시스템 파이썬만으로 동작, pyransac3d/pybullet 의존성 제거).
+
+- **`tunnel_wall_detector_node.py`**: `/lidar_1/scan_3D` 구독 -> 다운샘플 -> 거리필터
+  (`min_valid_dist_m`=0.1) -> RANSAC(직접 구현) -> SVD 법선 -> 수평 필터 -> `/perception/wall_cloud`,
+  `/perception/wall_plane`, `/perception/target_pose`, `/perception/markers` 발행. 실물 제어
+  토픽은 전혀 발행하지 않음(코드/로그에 명시).
+- **실측 버그 1 - 접촉시험 패널 오검출**: Piper URDF의 link6 근처에 다른 프로젝트(`gpr_robot`)용
+  접촉시험 패널(`wall_left/right/top/bottom`, `extension_plate`, `extension_wall_left/right`,
+  `mount_plate`)이 붙어있어서, lidar_1이 진짜 터널 벽 대신 이 근접 패널(0.02~0.75m)을 벽으로
+  오검출(inlier 820+/840). 처음엔 `piper_hil_builder.py`에 `_remove_test_panels()`를 추가해서
+  Gazebo URDF에서만 이 패널들을 제거해 해결했으나(패널 제거 후 원본 거리 0.3~0.75m -> 4~5.5m로
+  즉시 확인), **이후 사용자가 push_forward_node가 이 패널들(4점 SVD로 판 자체 법선을 구하는 데
+  씀)을 다시 쓸 거라 판단해 전부 원복** - 대신 `min_valid_dist_m`을 0.1m로 유지해 이 문제와는
+  별개로 대응.
+- **실측 버그 2(핵심) - target_pose 흔들림 → 램프 무한 재시작**: `/perception/target_pose`를
+  매 프레임(~10Hz) 그대로 재발행했더니, RANSAC/SVD 프레임간 노이즈가 `piper_controller_node`의
+  "새 목표" 판정 임계값(`TARGET_POS_EPS_M`=2mm/`TARGET_ORN_EPS_DEG`=0.5도)보다 계속 커서, 30초
+  접근 램프가 매 프레임 리셋되며 실측 80초 넘게 위치오차가 전혀 안 줄어드는 현상 재현(실물
+  하드웨어로 직접 확인, 이후 안전하게 정지). **수정**: `contact_planner_node`의 LOCK과 동일한
+  발상으로 안정화 게이팅 추가 - 최근 `stability_window`=15프레임의 중심/법선이
+  `stability_pos_tol_m`=1cm/`stability_angle_tol_deg`=2도 이내로 일치해야 값을 받아들이고,
+  처음 안정화되는 순간 그 값을 **영구 고정**(이후 LiDAR 재계산 안 함, `wall_cloud`만 계속
+  라이브로 진단용 발행). 수정 후 실물 재현 테스트로 검증: "새 목표" 로그가 단 한 번만 찍히고
+  정확히 29.0초 뒤 I항(정지 후 오차보정) 로그가 이어짐 - jitter로 인한 재시작 완전히 제거됨
+  확인.
+- **`piper_target_relay_node.py`(신규)**: `/perception/target_pose` -> `/piper/target_pose`
+  그대로 릴레이 - 이 노드가 뜬 순간부터 `piper_controller_node`가 떠 있으면 실물 팔이 즉시
+  움직인다는 경고를 로그/docstring에 명시. **사용자가 "게이트 없이 바로 연결" + "지금 팔 주변
+  안전 확인함"을 명시적으로 확인한 뒤에만** 추가/실행함(매 실물 구동 전마다 재확인 받음 -
+  플랫폼 위치가 바뀔 때마다, 6cm로 접근거리를 좁힐 때마다 따로 확인받음).
+- **`/piper/locked_wall_plane` 추가**: 기존 `push_forward_node`(원래 `contact_planner_node`와
+  짝을 이루던 실물 전용 노드)를 이 새 파이프라인에서도 그대로 재사용하기 위해, `tunnel_wall_
+  detector_node`가 LOCK 순간 `contact_planner_node`와 정확히 동일한 메시지 포맷/QoS
+  (`PoseStamped`, `TRANSIENT_LOCAL`, 위치=평면 위 점, orientation=`quat_from_z_axis(normal)`
+  부호반전 없음)로 이 토픽을 한 번 발행하도록 추가 - 늦게 뜨는 `push_forward_node`도 정상 수신
+  확인(late-join 테스트로 검증).
+- **`target_standoff_m`: 0.20 -> 0.06** (노드 기본값 + launch 기본값 둘 다 변경, launch가
+  노드 기본값을 오버라이드하고 있다는 걸 처음에 놓쳐서 launch 쪽도 따로 고쳐야 했음).
+
+### 2. 실물 통합 테스트: LOCK → 실물 접근 → LEVEL → PUSH → HOLD 전체 파이프라인 1회 성공
+
+`tunnel_wall_detector_node` + `piper_target_relay_node` + 실물 `piper_controller_node` +
+`push_forward_node`를 처음으로 전부 연결해서 실물로 시험함(매 단계 사용자에게 명시적 안전
+확인 받고 진행).
+
+- **20cm/6cm 첫 시도(플랫폼 재배치 전)**: IK가 primary+대안 9개 시드 전부 실패해서 목표를
+  거부, 팔은 안전하게 제자리 유지(최대관절차 0.0도로 종료 로그 확인) - 검증 안 된 해를 안 쓰는
+  안전장치가 의도대로 작동. 거리가 늘어난 원인은 6cm 표준오프셋이 20cm보다 벽 중심에 더
+  가까워서(=로봇 기준으론 더 멀어서, 약 0.79m) 기존 엘보 시드로 못 푸는 범위였을 가능성.
+- ⚠️ **중요 안전 발견**: 이 시점에 `/lidar_1/scan_3D`의 유일한 발행자가 `sim_pointcloud_adapter`
+  (Gazebo)라는 걸 확인 - 즉 이 테스트는 "시뮬레이션 가상 벽 위치를 향해 실물 팔을 이동"시키는
+  것이었음. 사용자에게 즉시 확인 요청 → **의도된 설계임을 확인**("시뮬레이션 안에 있는 lidar와
+  벽으로 테스트를 진행하는데 실제로 이동하는건 현실세계에 있는 로봇팔") - 이후 이 방식으로 계속
+  진행하되, 매 실물 구동 직전 안전 재확인을 받는 방식으로 대응.
+- **Gazebo `platform_lift_joint` 완전 고착 버그(재발)**: 사용자가 GUI에서 Z를 여러 번 빠르게
+  바꾸던 중, 어느 시점부터 어떤 목표값을 넣어도(1.0~6.0m 전부 시도) 실제값이 하한(0.5m)에
+  고정된 채 속도 0으로 전혀 안 움직이는 상태가 됨 - `platform_control_node`의 자체 충돌 감지
+  로그(`requested=... actual=0.500 error=...`)가 매번 찍혔지만, 특정 높이에서 막힌 게 아니라
+  **어떤 목표를 줘도 무조건 0.5로 고정**되는 패턴이라 벽/천장 충돌이 아니라고 판단. 컨트롤러
+  비활성화→재활성화 + 직접 명령 재전송으로도 안 풀림(ros2_control 레이어가 아니라 Gazebo/DART
+  물리엔진 자체에서 조인트가 멈춘 것으로 결론) - **Gazebo 전체 재시작으로 해결**(9/17 세션에서도
+  같은 증상이 있었고 그때도 재시작으로만 풀렸던 전례와 일치, 근본 원인은 여전히 미규명).
+- **재시작 후 전체 파이프라인 성공**(플랫폼 Y=3.3/Z=4.2, LOCK 목표거리 약 0.66m): LOCK →
+  실물 팔 29.0초 단일 연속 램프로 목표 도달(jitter 재시작 없음, "새 목표" 로그 단 1회만 발생 -
+  이번 세션 핵심 수정이 실측으로 검증됨) → 관절여유 전부 20도 이상(J3 23.8°/J4 20.9°/J5
+  20.1°, 한계 근접 없음) → `piper_target_relay_node` 정지(기존 실물 워크플로우와 동일하게
+  "플래너 끄고 push 노드 켜기") → `push_forward_node` 시작 → LEVEL 즉시 수렴(모서리 퍼짐
+  9.1mm, 목표<15mm) → CAPTURE → PUSH 안전 상한 6cm까지 깔끔히 완주 → HOLD로 자동 전환,
+  안정적 유지.
+  - `invalid_frac`(과거 접촉 감지용 참고값)은 시종일관 0%였는데, 확인해보니 **실제 lidar_2
+    드라이버가 안 떠 있어서** `_contact_invalid_fraction` 초기값(0.0)이 한 번도 안 바뀐 것뿐인
+    의미 없는 값이었음 - 착각하지 않도록 기록.
+
+### 3. "실제로 벽에 닿았는가?" 확인 - 완전히 결론 내지 못함 (⚠️ 다음 세션 확인 필요)
+
+Gazebo 화면에서 판이 벽에서 뜬 것처럼 보인다는 사용자 관찰(스크린샷) 이후 조사:
+
+- **수학적 검증**: `push_forward.log`의 CAPTURE 시점 판 위치와 LOCK된 평면(중심+법선)으로
+  평면까지 거리 계산 - CAPTURE 시점 6.36cm, `push_dir`이 `-normal`과 1.4도밖에 안 벗어나서
+  6cm push 후 예상 거리 **3.66mm**(판 프레임 원점=판 중심 기준). `extension_plate` URDF가
+  두께 1cm 박스이고 TF 프레임 원점이 앞면이 아니라 **정중앙**이라는 걸 확인 - "닿음" 기준은
+  중심-평면 거리 0이 아니라 반두께인 5mm여야 함. 3.66mm < 5mm이므로 계산상으로는 판 중심
+  기준 오히려 살짝 과관통(약 1.3mm) - 뜬 게 아니라 오히려 넘어갔어야 정상.
+  - 가능한 설명: 이 구간이 수직벽에서 아치(천장 돔)로 넘어가는 **곡면 구간**이라, LiDAR로
+    국소적으로 피팅한 평면(평평함)과 실제 곡면 벽 사이에 곡률 불일치가 있어 판(30x20cm, 평평함)
+    가장자리 쪽이 실제로 뜰 수 있음 - 계산 버그가 아니라 "평평한 판 vs 곡면 벽"의 기하학적
+    한계일 가능성. **미확인** - 곡면이 덜한 평평한 벽 구간에서 재시험 필요.
+- **실제 LiDAR로 교차검증 시도**: 실제 CygLiDAR D1 2대를 진단 전용(어떤 제어 경로에도 미연결,
+  `/lidar_1/scan_3D_real_diag`, `/lidar_2/scan_3D_real_diag`로 토픽 분리해 Gazebo의
+  `sim_pointcloud_adapter`와 충돌 안 나게 함)로 직접 띄워서 측정: lidar_1 최소거리 3.5cm/중앙값
+  6.5cm(유효점 40%), lidar_2 최소거리 2.4cm/중앙값 60.5cm(유효점 45%) - 뭔가 몇 cm 이내로
+  아주 가까운 건 확인되지만, **과거 기록(9/11 세션)에 이미 "lidar_1이 벽 대신 자기 팔의 근접
+  시험판을 오검출"한 전례가 있어서, 이 근접값이 진짜 터널 벽인지 판 자신의 마운트 구조물인지
+  라이다만으로는 확실히 구분 못 함**. 최종적으로 사용자에게 직접 육안 확인을 권장.
+- **결론: 미해결** - 다음 세션에서 (a) 사용자가 직접 육안으로 확인한 결과를 반영하거나,
+  (b) 곡률이 덜한 평평한 벽 구간에서 재시험하거나, (c) 판 앞면에 더 가까운 기준점(예: 판
+  네 모서리 중 가장 가까운 점, 또는 판 앞면 중심)으로 "닿음" 판정 기준 자체를 재설계하는 것을
+  검토할 것.
+
+### 4. 세션 종료 상태
+
+- **git**: `tunnel_hil_sim`/`piper_platform_gui`/트랙 제거는 이미 커밋됨(`ba6cbe6`). 이번
+  세션에서 새로 만든 `tunnel_wall_detector` 패키지 + `piper_target_relay_node` +
+  `/piper/locked_wall_plane` + `target_standoff_m` 0.06 변경 + `view_dual_cyglidar.launch.py`
+  (실제 라이다 진단용 신규 launch) + `piper_controller_node.py`/`view_piper_lidar.launch.py`/
+  `piper_hil.rviz`의 이전 세션 미커밋 변경분까지 전부 이 세션 끝에 커밋 + `origin/main` 푸시함.
+- **실물 하드웨어**: `push_forward_node`/`piper_controller_node` 정상 종료 절차(SIGINT -> 홈
+  복귀 램프 -> 모터 비활성화)로 정리하고 세션 마무리. 재개 시 팔 위치/anchor 확인부터 할 것.
+- **Gazebo/실제 라이다 진단 프로세스**: 전부 정지. 플랫폼 위치(Y=3.3/Z=4.2)는 재시작하면
+  launch 기본값(0.0/1.0) 또는 지정한 `platform_initial_y`/`platform_initial_z`로 리셋됨.
+
+### 5. 다음 세션 후보
+
+1. **"실제로 벽에 닿았는가?" 확인** - 위 3번 항목, 최우선. 곡면 아닌 평평한 벽에서 재시험 또는
+   판정 기준(중심 vs 앞면 vs 모서리) 재검토.
+2. **`tunnel_wall_detector`를 `contact_planner_node`처럼 다단계(ALIGN→LOCK)로 발전시킬지 판단**
+   - 지금은 "안정화되면 그 즉시 영구 LOCK"뿐이라 오검출된 상태로 LOCK되면 재시작 전까진 복구
+     불가. 재시도/재LOCK 트리거(예: 서비스 콜 또는 타임아웃 후 재시도) 필요성 검토.
+3. 기존 9/17 세션 후보(6cm PUSH 실측 검증은 이번에 완료, 나머지 - 벽 접촉 감지→I항 중단 연결,
+   J1/J5/J6 I항, DDS 유령 대응 로직, 엘보 시드 다양성 재적용 판단)는 그대로 유효.

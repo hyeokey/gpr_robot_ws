@@ -21,6 +21,12 @@ CYGLIDAR_PID = 0x2303
 # ⚠️ 케이블을 물리적으로 다른 USB 포트에 옮겨 꽂으면 이 값도 다시 확인해야 한다.
 LIDAR_1_USB_LOCATION = "1-4.2.2"
 
+# 2026-09-18 (사용자 요청): lidar_2를 더 이상 안 쓰기로 함 - USB 포트가 감지돼도 D1_Node
+# 자체를 안 띄워서 애초에 신호를 안 읽어오게 막는다(contact_planner_node는 이미 9/16에
+# lidar_1만 검출에 쓰도록 바뀌어 있었지만, lidar_2 드라이버/correction 노드는 참고용 진단
+# 로그를 위해 계속 띄우고 있었음 - 이제 그 용도까지 완전히 끔). True로 되돌리면 즉시 복귀.
+ENABLE_LIDAR_2 = False
+
 
 def find_cyglidar_ports():
     """연결된 모든 CygLiDAR(PL2303, 벤더/제품ID로 식별)의 장치 경로를, 기존 라이다
@@ -148,7 +154,7 @@ def launch_setup(context, *args, **kwargs):
                           pitch_deg=-3.5, lpf_alpha=0.3),
     ]
 
-    if len(ports) > 1:
+    if len(ports) > 1 and ENABLE_LIDAR_2:
         # 2026-09-10: lidar_2의 2D 스캔(/lidar_2/scan, /lidar_2/scan_2D)을 확인하려고 DUAL(2)로
         # 켬 - 확인 끝나면 run_mode=1로 되돌릴 것.
         nodes.append(_lidar_node('lidar_2', ports[1], 'lidar_2_optical_frame', 1, run_mode=2))
@@ -164,7 +170,8 @@ def launch_setup(context, *args, **kwargs):
                                        '/lidar_2/scan_3D', '/lidar_2/scan_3D_corrected',
                                        dx=-0.05, lpf_alpha=0.3))
     else:
-        print("[view_piper_lidar] CygLiDAR가 1개만 감지됨 - lidar_2 노드는 건너뜀.")
+        reason = "ENABLE_LIDAR_2=False라 비활성화됨" if len(ports) > 1 else "CygLiDAR가 1개만 감지됨"
+        print(f"[view_piper_lidar] {reason} - lidar_2 노드는 건너뜀.")
 
     nodes.append(Node(
         package='rviz2',
