@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>piper_platform_gui</name>
+  <version>0.1.0</version>
+  <description>
+    Gazebo GUI panel (gz-gui plugin) to jog the tunnel_hil_sim movable Piper
+    platform's lateral (Y) and lift (Z) axes. Talks only to the /sim-only
+    platform_control_node via ROS parameters and /sim/joint_states - never
+    touches real hardware topics.
+  </description>
+  <maintainer email="msol62@krri.re.kr">hyeokey</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>gz_gui_vendor</depend>
+  <depend>qtbase5-dev</depend>
+  <depend>qtdeclarative5-dev</depend>
+  <depend>qtquickcontrols2-5-dev</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

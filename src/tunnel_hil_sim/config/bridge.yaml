@@ -1,0 +1,20 @@
+- ros_topic_name: "/sim/lidar_1/points"
+  gz_topic_name: "/sim/lidar_1/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+  lazy: false
+
+- ros_topic_name: "/sim/lidar_2/points"
+  gz_topic_name: "/sim/lidar_2/scan/points"
+  ros_type_name: "sensor_msgs/msg/PointCloud2"
+  gz_type_name: "gz.msgs.PointCloudPacked"
+  direction: GZ_TO_ROS
+  lazy: false
+
+- ros_topic_name: "/clock"
+  gz_topic_name: "/clock"
+  ros_type_name: "rosgraph_msgs/msg/Clock"
+  gz_type_name: "gz.msgs.Clock"
+  direction: GZ_TO_ROS
+  lazy: false

@@ -1,0 +1,38 @@
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    piper_position_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    platform_lateral_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    platform_lift_controller:
+      type: forward_command_controller/ForwardCommandController
+
+/**/piper_position_controller:
+  ros__parameters:
+    joints:
+      - joint1
+      - joint2
+      - joint3
+      - joint4
+      - joint5
+      - joint6
+    interface_name: position
+
+/**/platform_lateral_controller:
+  ros__parameters:
+    joints:
+      - platform_lateral_joint
+    interface_name: position
+
+/**/platform_lift_controller:
+  ros__parameters:
+    joints:
+      - platform_lift_joint
+    interface_name: position

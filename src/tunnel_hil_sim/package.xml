@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>tunnel_hil_sim</name>
+  <version>0.3.1</version>
+  <description>Gazebo tunnel and dual-LiDAR environment for safe Piper HIL development.</description>
+  <maintainer email="user@example.com">gpr_robot_ws maintainer</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>controller_manager</exec_depend>
+  <exec_depend>forward_command_controller</exec_depend>
+  <exec_depend>gz_ros2_control</exec_depend>
+  <exec_depend>joint_state_broadcaster</exec_depend>
+  <exec_depend>piper_description</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,83 @@
+<?xml version="1.0" ?>
+<sdf version="1.9">
+  <world name="subway_tunnel_hil">
+    <gravity>0 0 -9.81</gravity>
+    <physics name="1ms" type="ignored"><max_step_size>0.001</max_step_size><real_time_factor>1.0</real_time_factor></physics>
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors"><render_engine>ogre2</render_engine></plugin>
+    <scene><ambient>0.08 0.08 0.09 1</ambient><background>0.015 0.018 0.022 1</background><shadows>true</shadows></scene>
+
+    <!-- 8 m clear arch span, 4 m radius, 3 m side walls, 20 m length. -->
+    <model name="subway_tunnel_shell">
+      <static>true</static>
+      <link name="floor"><pose>10 0 -0.125 0 0 0</pose><collision name="collision"><geometry><box><size>20 8.25 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 8.25 0.25</size></box></geometry><material><ambient>0.20 0.20 0.21 1</ambient><diffuse>0.28 0.28 0.30 1</diffuse></material></visual></link>
+      <link name="right_straight_wall"><pose>10 4.125 1.5 0 0 0</pose><collision name="collision"><geometry><box><size>20 0.25 3.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.25 3.0</size></box></geometry><material><ambient>0.34 0.35 0.36 1</ambient><diffuse>0.43 0.44 0.45 1</diffuse></material></visual></link>
+      <link name="left_straight_wall"><pose>10 -4.125 1.5 0 0 0</pose><collision name="collision"><geometry><box><size>20 0.25 3.0</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.25 3.0</size></box></geometry><material><ambient>0.34 0.35 0.36 1</ambient><diffuse>0.43 0.44 0.45 1</diffuse></material></visual></link>
+
+      <!-- Sixteen collision-backed facets approximate the concrete arch. -->
+      <link name="arch_01"><pose>10 4.1051 3.4043 1.668971 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_02"><pose>10 3.9474 4.1974 1.865321 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_03"><pose>10 3.6379 4.9445 2.061670 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_04"><pose>10 3.1887 5.6169 2.258020 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_05"><pose>10 2.6169 6.1887 2.454369 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_06"><pose>10 1.9445 6.6379 2.650719 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_07"><pose>10 1.1974 6.9474 2.847068 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_08"><pose>10 0.4043 7.1051 3.043418 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_09"><pose>10 -0.4043 7.1051 3.239767 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_10"><pose>10 -1.1974 6.9474 3.436117 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_11"><pose>10 -1.9445 6.6379 3.632467 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_12"><pose>10 -2.6169 6.1887 3.828816 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_13"><pose>10 -3.1887 5.6169 4.025166 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_14"><pose>10 -3.6379 4.9445 4.221515 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+      <link name="arch_15"><pose>10 -3.9474 4.1974 4.417865 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.31 0.32 0.33 1</ambient><diffuse>0.40 0.41 0.42 1</diffuse></material></visual></link>
+      <link name="arch_16"><pose>10 -4.1051 3.4043 4.614214 0 0</pose><collision name="collision"><geometry><box><size>20 0.82 0.25</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.82 0.25</size></box></geometry><material><ambient>0.32 0.33 0.34 1</ambient><diffuse>0.41 0.42 0.43 1</diffuse></material></visual></link>
+
+      <!-- Flush wall target for repeatable RANSAC/SVD tests. -->
+      <link name="inspection_panel"><pose>2.5 3.97 1.55 0 0 0</pose><collision name="collision"><geometry><box><size>2.0 0.04 2.1</size></box></geometry></collision><visual name="visual"><geometry><box><size>2.0 0.04 2.1</size></box></geometry><material><ambient>0.52 0.48 0.39 1</ambient><diffuse>0.60 0.56 0.47 1</diffuse></material></visual></link>
+    </model>
+
+    <model name="track">
+      <static>true</static>
+      <link name="ballast"><pose>10 0 0.10 0 0 0</pose><collision name="collision"><geometry><box><size>20 3.2 0.20</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 3.2 0.20</size></box></geometry><material><ambient>0.16 0.15 0.14 1</ambient><diffuse>0.23 0.22 0.20 1</diffuse></material></visual></link>
+      <link name="rail_right"><pose>10 0.76 0.31 0 0 0</pose><collision name="collision"><geometry><box><size>20 0.075 0.14</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.075 0.14</size></box></geometry><material><ambient>0.22 0.23 0.25 1</ambient><diffuse>0.42 0.44 0.47 1</diffuse></material></visual></link>
+      <link name="rail_left"><pose>10 -0.76 0.31 0 0 0</pose><collision name="collision"><geometry><box><size>20 0.075 0.14</size></box></geometry></collision><visual name="visual"><geometry><box><size>20 0.075 0.14</size></box></geometry><material><ambient>0.22 0.23 0.25 1</ambient><diffuse>0.42 0.44 0.47 1</diffuse></material></visual></link>
+      <link name="sleeper_01"><pose>0.6 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_02"><pose>1.8 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_03"><pose>3.0 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_04"><pose>4.2 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_05"><pose>5.4 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_06"><pose>6.6 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_07"><pose>7.8 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_08"><pose>9.0 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_09"><pose>10.2 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_10"><pose>11.4 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_11"><pose>12.6 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_12"><pose>13.8 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_13"><pose>15.0 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_14"><pose>16.2 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_15"><pose>17.4 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+      <link name="sleeper_16"><pose>18.6 0 0.22 0 0 0</pose><visual name="v"><geometry><box><size>0.24 2.4 0.16</size></box></geometry><material><diffuse>0.30 0.23 0.16 1</diffuse></material></visual></link>
+    </model>
+
+    <!-- Fixed phase-1 plate; both sensors face the +Y inspection panel. -->
+    <model name="dual_lidar_rig">
+      <static>true</static>
+      <link name="rig_body"><pose>2.5 0 1.25 0 0 0</pose><visual name="visual"><geometry><box><size>0.65 0.10 0.28</size></box></geometry><material><diffuse>0.93 0.48 0.10 1</diffuse></material></visual></link>
+      <link name="lidar_1_link">
+        <pose>2.75 0 1.25 0 0 1.570796</pose><visual name="body"><geometry><box><size>0.06 0.05 0.05</size></box></geometry><material><diffuse>0.07 0.07 0.07 1</diffuse></material></visual>
+        <sensor name="lidar_1" type="gpu_lidar"><topic>/sim/lidar_1/scan</topic><update_rate>10</update_rate><always_on>true</always_on><visualize>true</visualize><ray><scan><horizontal><samples>181</samples><resolution>1</resolution><min_angle>-0.436332</min_angle><max_angle>0.436332</max_angle></horizontal><vertical><samples>81</samples><resolution>1</resolution><min_angle>-0.349066</min_angle><max_angle>0.349066</max_angle></vertical></scan><range><min>0.05</min><max>8.0</max><resolution>0.005</resolution></range><noise><type>gaussian</type><mean>0</mean><stddev>0.003</stddev></noise></ray></sensor>
+      </link>
+      <link name="lidar_2_link">
+        <pose>2.25 0 1.25 0 0 1.570796</pose><visual name="body"><geometry><box><size>0.06 0.05 0.05</size></box></geometry><material><diffuse>0.07 0.07 0.07 1</diffuse></material></visual>
+        <sensor name="lidar_2" type="gpu_lidar"><topic>/sim/lidar_2/scan</topic><update_rate>10</update_rate><always_on>true</always_on><visualize>true</visualize><ray><scan><horizontal><samples>181</samples><resolution>1</resolution><min_angle>-0.436332</min_angle><max_angle>0.436332</max_angle></horizontal><vertical><samples>81</samples><resolution>1</resolution><min_angle>-0.349066</min_angle><max_angle>0.349066</max_angle></vertical></scan><range><min>0.05</min><max>8.0</max><resolution>0.005</resolution></range><noise><type>gaussian</type><mean>0</mean><stddev>0.003</stddev></noise></ray></sensor>
+      </link>
+    </model>
+
+    <light type="point" name="lamp_1"><pose>2.5 0 6.4 0 0 0</pose><diffuse>0.75 0.76 0.70 1</diffuse><attenuation><range>9</range><constant>0.35</constant><linear>0.04</linear><quadratic>0.01</quadratic></attenuation></light>
+    <light type="point" name="lamp_2"><pose>7.5 0 6.4 0 0 0</pose><diffuse>0.75 0.76 0.70 1</diffuse><attenuation><range>9</range><constant>0.35</constant><linear>0.04</linear><quadratic>0.01</quadratic></attenuation></light>
+    <light type="point" name="lamp_3"><pose>12.5 0 6.4 0 0 0</pose><diffuse>0.75 0.76 0.70 1</diffuse><attenuation><range>9</range><constant>0.35</constant><linear>0.04</linear><quadratic>0.01</quadratic></attenuation></light>
+    <light type="point" name="lamp_4"><pose>17.5 0 6.4 0 0 0</pose><diffuse>0.75 0.76 0.70 1</diffuse><attenuation><range>9</range><constant>0.35</constant><linear>0.04</linear><quadratic>0.01</quadratic></attenuation></light>
+  </world>
+</sdf>

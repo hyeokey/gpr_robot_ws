@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/PiperPlatformGui">
+    <file>PiperPlatformGui.qml</file>
+  </qresource>
+</RCC>
