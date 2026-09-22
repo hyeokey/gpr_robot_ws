@@ -605,9 +605,26 @@ class PushForwardNode(Node):
          target.pose.orientation.z, target.pose.orientation.w) = target_link6_orn
         self.target_pub.publish(target)
 
+        # 2026-09-22: "판이 실제로 벽에 닿았는가"를 판 중심(두께 고려 필요, 모호함) 대신 4개
+        # 모서리(wall_left/wall_right/extension_wall_left/extension_wall_right) 각각의 벽까지
+        # 실측 거리로 직접 보고한다 - LEVEL이 이미 쓰는 _corner_positions()/_corner_wall_distances()
+        # 그대로 재사용(제어 로직 변경 없음, 순수 진단 로그 추가). 곡면 벽 vs 평평한 판 불일치라면
+        # 모서리별로 값이 크게 갈릴 것이고, 진짜 안 닿은 거라면 4개 다 비슷하게 클 것 - 어제
+        # 판 중심 하나만 계산해서 생겼던 모호함(9/21 세션 3번 항목)을 없앤다.
+        corner_positions = self._corner_positions()
+        if corner_positions is not None and self._wall_centroid is not None:
+            corner_mm = {
+                name: dist * 1000.0
+                for name, dist in self._corner_wall_distances(corner_positions).items()
+            }
+            corner_str = " ".join(f"{name}={d:+.1f}mm" for name, d in corner_mm.items())
+        else:
+            corner_str = "N/A"
+
         self.get_logger().info(
             f"[{self.state}] push_distance={self.push_distance * 100:.1f}cm "
-            f"invalid_frac={self._contact_invalid_fraction * 100:.0f}%",
+            f"invalid_frac={self._contact_invalid_fraction * 100:.0f}% "
+            f"모서리거리({corner_str})",
             throttle_duration_sec=1.0,
         )
 

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""터널 벽면 검출 + 목표 자세 계산 (perception-only, 1단계).
+"""터널 벽면 검출 + 목표 자세 계산 + 실물 팔 제어 직접 발행.
 
 /lidar_1/scan_3D(실물 또는 tunnel_hil_sim 어느 쪽이든 같은 토픽 이름) 하나만 구독해서
 다운샘플링 -> 거리 필터 -> RANSAC -> SVD 법선 계산 순서로 벽 평면을 추정하고, 그 결과를
-전부 /perception/* 토픽(아래)과 RViz Marker로만 낸다. 실물 로봇팔을 움직이는 어떤 토픽도
-발행하지 않는다 - contact_planner_node(/piper/target_pose를 직접 발행해 piper_controller_node를
-즉시 움직이는 기존 노드)와는 완전히 분리되어 있고, 서로 아무 것도 구독/발행하지 않는다.
+/perception/* 토픽(아래)과 RViz Marker로 낸다.
+
+⚠️ 2026-09-22: 원래는 이 노드가 순수 인식 전용이고, 별도 `piper_target_relay_node`가
+`/perception/target_pose` -> `/piper/target_pose`를 릴레이해서 실물 제어에 "연결"하는
+구조였다(인식과 제어를 노드 단위로 분리하려는 의도). 사용자 요청으로 그 relay 노드를 없애고,
+이 노드가 `contact_planner_node`와 동일하게 `/piper/target_pose`를 **직접** 발행하도록
+합쳤다 - **이 노드가 뜨는 순간부터 `piper_controller_node`가 떠 있으면 실물 팔이 검출된
+목표를 향해 즉시(속도 상한 램프로 천천히) 움직이기 시작한다.** 실행 전 항상 팔 주변에
+장애물/사람이 없는지 확인할 것.
 
 출력:
   /perception/wall_cloud  (PointCloud2)  - 벽으로 판정된 RANSAC inlier 점들 (base_frame,
@@ -16,6 +22,8 @@
   /perception/target_pose (PoseStamped)  - 벽에서 target_standoff_m만큼 물러난 목표 자세
                                             (로컬 +Z=접근 방향, 즉 -법선). wall_plane과 동일한
                                             안정화 게이팅.
+  /piper/target_pose      (PoseStamped)  - 위 target_pose와 완전히 동일한 값을 실물
+                                            piper_controller_node 제어 입력으로 그대로 발행.
   /perception/markers     (MarkerArray)  - 위 전부를 눈으로 확인하기 위한 시각화
 
 안정화 + LOCK(2단계, 실제 팔 제어 연결 후 실측으로 추가됨): target_pose를 매 프레임(~10Hz)
@@ -191,6 +199,15 @@ class TunnelWallDetectorNode(Node):
         # 걸러짐) - 그래서 다시 contact_planner_node의 원래 값(0.1m, 무효 픽셀 원점 노이즈
         # 제거용)으로 되돌림.
         self.declare_parameter("min_valid_dist_m", 0.1)
+        # 2026-09-22: contact_planner_node.py의 수평/수직 FOV 크롭(HFOV_MIN/MAX_DEG,
+        # VFOV_MIN/MAX_DEG)을 새로 만들 때 옮겨 담는 걸 놓쳤던 걸 뒤늦게 발견해서 추가.
+        # CygLiDAR D1 전체 FOV는 수평 120도/수직 65도(CYG_Constant.h)인데, contact_planner_node가
+        # 2026-09-11 천장 오검출 방지로 ±50도(수평)/±25도(수직)까지 좁혀둔 값을 그대로 재사용 -
+        # 라이다 로컬(optical frame) 좌표에서 arctan2로 각 점의 수평/수직 각도를 계산해 자른다.
+        self.declare_parameter("hfov_min_deg", -50.0)
+        self.declare_parameter("hfov_max_deg", 50.0)
+        self.declare_parameter("vfov_min_deg", -25.0)
+        self.declare_parameter("vfov_max_deg", 25.0)
         self.declare_parameter("voxel_size_m", 0.03)
         self.declare_parameter("ransac_thresh_m", 0.02)
         self.declare_parameter("ransac_max_iterations", 300)
@@ -231,6 +248,9 @@ class TunnelWallDetectorNode(Node):
         self.wall_cloud_pub = self.create_publisher(PointCloud2, "/perception/wall_cloud", 10)
         self.wall_plane_pub = self.create_publisher(PoseStamped, "/perception/wall_plane", 10)
         self.target_pose_pub = self.create_publisher(PoseStamped, "/perception/target_pose", 10)
+        # 2026-09-22: piper_target_relay_node 삭제, 실물 제어 발행을 이 노드로 직접 합침
+        # (모듈 docstring 참고) - contact_planner_node와 동일하게 이 토픽에 직접 발행한다.
+        self.piper_target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
         self.marker_pub = self.create_publisher(MarkerArray, "/perception/markers", 10)
         # 2026-09-21: push_forward_node(원래 contact_planner_node와 짝을 이루던 기존 노드)가
         # 구독하는 것과 동일한 토픽/QoS/메시지 포맷 - contact_planner_node.py:408-410,748을 그대로
@@ -248,9 +268,10 @@ class TunnelWallDetectorNode(Node):
         )
 
         self.get_logger().warn(
-            "perception-only 노드입니다 - 실물 로봇팔 제어 토픽은 전혀 발행하지 않습니다. "
-            f"입력={input_topic}, 출력=/perception/wall_cloud, /perception/wall_plane, "
-            "/perception/target_pose, /perception/markers (전부 RViz 확인용)."
+            "⚠️ /piper/target_pose 발행이 활성화되어 있습니다 - 유효한 평면이 검출되는 즉시 "
+            "piper_controller_node가 실제로 팔을 그쪽으로 움직입니다(속도 상한 램프, 게이트 "
+            f"없음). 입력={input_topic}, 참고용 출력=/perception/wall_cloud, "
+            "/perception/wall_plane, /perception/target_pose, /perception/markers."
         )
 
     def _lookup(self, target_frame, source_frame, stamp):
@@ -281,6 +302,21 @@ class TunnelWallDetectorNode(Node):
         # 2) 거리 필터 (무효 픽셀은 (0,0,0)으로 채워짐 - 원점 근처 노이즈 제거)
         min_valid_dist = float(self.get_parameter("min_valid_dist_m").value)
         points_local = points_local[np.linalg.norm(points_local, axis=1) >= min_valid_dist]
+
+        # 2.5) 수평/수직 FOV 크롭 (contact_planner_node._filter_local_points와 동일한 공식 -
+        # 라이다 로컬 좌표 X=전방/Y=왼쪽/Z=위 기준).
+        if points_local.shape[0] > 0:
+            hfov_min = float(self.get_parameter("hfov_min_deg").value)
+            hfov_max = float(self.get_parameter("hfov_max_deg").value)
+            hfov_angle_deg = np.degrees(np.arctan2(points_local[:, 1], points_local[:, 0]))
+            points_local = points_local[(hfov_angle_deg >= hfov_min) & (hfov_angle_deg <= hfov_max)]
+        if points_local.shape[0] > 0:
+            vfov_min = float(self.get_parameter("vfov_min_deg").value)
+            vfov_max = float(self.get_parameter("vfov_max_deg").value)
+            vfov_angle_deg = np.degrees(np.arctan2(
+                points_local[:, 2], np.hypot(points_local[:, 0], points_local[:, 1])
+            ))
+            points_local = points_local[(vfov_angle_deg >= vfov_min) & (vfov_angle_deg <= vfov_max)]
 
         min_points = int(self.get_parameter("min_points").value)
         if points_local.shape[0] < min_points:
@@ -353,9 +389,11 @@ class TunnelWallDetectorNode(Node):
             # LOCK 완료 - 더는 이번 프레임 값을 안 본다. wall_cloud만 라이브로 계속 나가고,
             # 아래(wall_plane/target_pose/markers)는 전부 LOCK 시점 값 그대로 재발행.
             self._publish_wall_plane(self._locked_centroid, self._locked_normal, base_frame, stamp)
-            self.target_pose_pub.publish(self._make_target_pose_msg(
+            locked_target_msg = self._make_target_pose_msg(
                 self._locked_target_pos, self._locked_target_orn, base_frame, stamp
-            ))
+            )
+            self.target_pose_pub.publish(locked_target_msg)
+            self.piper_target_pub.publish(locked_target_msg)
             self._publish_markers(
                 self._locked_inliers, self._locked_centroid, self._locked_normal,
                 self._locked_target_pos, base_frame, stamp, locked=True,
@@ -369,13 +407,31 @@ class TunnelWallDetectorNode(Node):
             )
             return
 
-        stable = self._check_stability(centroid, normal)
+        # 2026-09-22 실측으로 발견 + 사용자 확인 후 수정: 크고 평평한 벽에서는 RANSAC inlier의
+        # raw 중심점(centroid)이 매 프레임 어느 부분집합이 뽑히느냐에 따라 평면 위 아무 데나
+        # 찍혀서, 법선은 안정적인데도 중심점만 프레임마다 수십cm씩 튀는 현상이 실측 확인됨(곡면
+        # 문제와는 별개). link6(tip)에서 평면으로 내린 수선의 발(contact_point)은 평면 방정식
+        # 자체에만 의존하고 어떤 점을 centroid로 썼는지와 무관하다(증명 가능) - 그래서 안정화
+        # 판정 자체를 contact_point 기준으로 바꾼다. tip_pos가 필요해서 lookup을 여기로 당겨옴
+        # (기존엔 LOCK 확정 순간에만 조회했음).
+        tip_tf = self._lookup(base_frame, "link6", Time())
+        if tip_tf is None:
+            self._publish_markers(inlier_points, centroid, normal, None, base_frame, stamp)
+            return
+        tip_pos = np.array(tip_tf[0])
+        # 법선 부호를 tip 쪽으로 통일(contact_planner_node와 동일 - 평면 -> tip 방향).
+        if np.dot(normal, tip_pos - centroid) < 0:
+            normal = -normal
+        signed_distance = float(np.dot(tip_pos - centroid, normal))
+        contact_point = tip_pos - signed_distance * normal
+
+        stable = self._check_stability(contact_point, normal)
         if stable is None:
             window = int(self.get_parameter("stability_window").value)
-            self._publish_markers(inlier_points, centroid, normal, None, base_frame, stamp)
+            self._publish_markers(inlier_points, contact_point, normal, None, base_frame, stamp)
             self.get_logger().info(
                 f"[안정화 중 {len(self._stability_history)}/{window}] "
-                f"중심=({centroid[0]:.3f},{centroid[1]:.3f},{centroid[2]:.3f}) "
+                f"접촉점=({contact_point[0]:.3f},{contact_point[1]:.3f},{contact_point[2]:.3f}) "
                 f"법선=({normal[0]:.3f},{normal[1]:.3f},{normal[2]:.3f}) "
                 f"inliers={n_inliers}/{points_base.shape[0]}",
                 throttle_duration_sec=1.0,
@@ -383,30 +439,34 @@ class TunnelWallDetectorNode(Node):
             return
 
         # 처음 안정화된 순간 - 이 값을 영구히 LOCK(사용자 요청, contact_planner_node와 동일).
-        stable_centroid, stable_normal = stable
-        target_pos, target_orn = self._compute_target_pose(stable_centroid, stable_normal)
-        self._locked_centroid = stable_centroid
+        stable_contact_point, stable_normal = stable
+        standoff = float(self.get_parameter("target_standoff_m").value)
+        target_pos = stable_contact_point + stable_normal * standoff
+        # tip의 로컬 +Z는 "접근 방향"(contact_planner_node와 동일 컨벤션) - normal은 "벽->센서"
+        # 방향이라, 접근하려면 그 반대(센서->벽)를 향해야 하므로 -normal로 뒤집는다.
+        target_orn = quat_from_z_axis(-stable_normal)
+
+        self._locked_centroid = stable_contact_point
         self._locked_normal = stable_normal
         self._locked_inliers = inlier_points
         self._locked_target_pos = target_pos
         self._locked_target_orn = target_orn
 
-        self._publish_wall_plane(stable_centroid, stable_normal, base_frame, stamp)
-        self.target_pose_pub.publish(
-            self._make_target_pose_msg(target_pos, target_orn, base_frame, stamp)
-        )
+        self._publish_wall_plane(stable_contact_point, stable_normal, base_frame, stamp)
+        target_msg = self._make_target_pose_msg(target_pos, target_orn, base_frame, stamp)
+        self.target_pose_pub.publish(target_msg)
+        self.piper_target_pub.publish(target_msg)
         self._publish_markers(
-            inlier_points, stable_centroid, stable_normal, target_pos, base_frame, stamp,
+            inlier_points, stable_contact_point, stable_normal, target_pos, base_frame, stamp,
             locked=True,
         )
-        # contact_planner_node와 동일한 메시지(위치=평면 위 한 점, orientation=quat_from_z_axis(
-        # normal), 부호반전 없음) - push_forward_node는 평면 방정식(점+법선)만 쓰므로 그 점이
-        # SVD 중심이든 contact_planner_node의 tip 기준 점이든 상관없다.
+        # contact_planner_node와 동일한 메시지(위치=평면 위 한 점=contact_point,
+        # orientation=quat_from_z_axis(normal), 부호반전 없음).
         locked_plane_msg = PoseStamped()
         locked_plane_msg.header.stamp = stamp
         locked_plane_msg.header.frame_id = base_frame
         (locked_plane_msg.pose.position.x, locked_plane_msg.pose.position.y,
-         locked_plane_msg.pose.position.z) = (float(v) for v in stable_centroid)
+         locked_plane_msg.pose.position.z) = (float(v) for v in stable_contact_point)
         (locked_plane_msg.pose.orientation.x, locked_plane_msg.pose.orientation.y,
          locked_plane_msg.pose.orientation.z, locked_plane_msg.pose.orientation.w) = (
             quat_from_z_axis(stable_normal)
@@ -414,26 +474,27 @@ class TunnelWallDetectorNode(Node):
         self.locked_plane_pub.publish(locked_plane_msg)
 
         self.get_logger().warn(
-            f"평면 검출 LOCK. 중심=({stable_centroid[0]:.3f},{stable_centroid[1]:.3f},"
-            f"{stable_centroid[2]:.3f}) 법선=({stable_normal[0]:.3f},{stable_normal[1]:.3f},"
+            f"평면 검출 LOCK. 접촉점=({stable_contact_point[0]:.3f},{stable_contact_point[1]:.3f},"
+            f"{stable_contact_point[2]:.3f}) 법선=({stable_normal[0]:.3f},{stable_normal[1]:.3f},"
             f"{stable_normal[2]:.3f}) 목표=({target_pos[0]:.3f},{target_pos[1]:.3f},"
             f"{target_pos[2]:.3f}) - 이제부터 이 값을 고정하고 더는 LiDAR로 재계산하지 않습니다."
         )
 
-    def _check_stability(self, centroid: np.ndarray, normal: np.ndarray):
-        """최근 stability_window개 프레임의 centroid/normal이 서로 tol 이내로 일치하면
-        (median_centroid, median_normal)을 반환하고, 아직 안 맞으면 None을 반환한다."""
+    def _check_stability(self, point: np.ndarray, normal: np.ndarray):
+        """최근 stability_window개 프레임의 point(2026-09-22부터 raw SVD centroid 대신
+        link6 기준 contact_point)/normal이 서로 tol 이내로 일치하면 (median_point,
+        median_normal)을 반환하고, 아직 안 맞으면 None을 반환한다."""
         window = int(self.get_parameter("stability_window").value)
-        self._stability_history.append((centroid.copy(), normal.copy()))
+        self._stability_history.append((point.copy(), normal.copy()))
         if len(self._stability_history) > window:
             self._stability_history = self._stability_history[-window:]
         if len(self._stability_history) < window:
             return None
 
-        centroids = np.array([c for c, _ in self._stability_history])
+        points = np.array([p for p, _ in self._stability_history])
         normals = np.array([n for _, n in self._stability_history])
 
-        pos_spread = float(np.max(np.linalg.norm(centroids - centroids.mean(axis=0), axis=1)))
+        pos_spread = float(np.max(np.linalg.norm(points - points.mean(axis=0), axis=1)))
         normal_mean = normals.mean(axis=0)
         normal_mean /= np.linalg.norm(normal_mean)
         dots = np.clip(normals @ normal_mean, -1.0, 1.0)
@@ -444,10 +505,10 @@ class TunnelWallDetectorNode(Node):
         if pos_spread > pos_tol or angle_spread > angle_tol:
             return None
 
-        median_centroid = np.median(centroids, axis=0)
+        median_point = np.median(points, axis=0)
         median_normal = np.median(normals, axis=0)
         median_normal /= np.linalg.norm(median_normal)
-        return median_centroid, median_normal
+        return median_point, median_normal
 
     def _publish_wall_cloud(self, inlier_points, base_frame, stamp):
         header = Header()
@@ -467,14 +528,6 @@ class TunnelWallDetectorNode(Node):
         (msg.pose.orientation.x, msg.pose.orientation.y,
          msg.pose.orientation.z, msg.pose.orientation.w) = quat_from_z_axis(normal)
         self.wall_plane_pub.publish(msg)
-
-    def _compute_target_pose(self, centroid, normal):
-        standoff = float(self.get_parameter("target_standoff_m").value)
-        target_pos = centroid + normal * standoff
-        # tip의 로컬 +Z는 "접근 방향"(contact_planner_node와 동일 컨벤션) - normal은 "벽->센서"
-        # 방향이라, 접근하려면 그 반대(센서->벽)를 향해야 하므로 -normal로 뒤집는다.
-        target_orn = quat_from_z_axis(-normal)
-        return target_pos, target_orn
 
     def _make_target_pose_msg(self, target_pos, target_orn, base_frame, stamp):
         msg = PoseStamped()

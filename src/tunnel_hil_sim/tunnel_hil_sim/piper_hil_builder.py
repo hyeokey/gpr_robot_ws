@@ -130,6 +130,11 @@ def _add_platform(robot: ET.Element, platform: PlatformConfig) -> None:
         "lower": f"{platform.min_y}", "upper": f"{platform.max_y}",
         "effort": "5000", "velocity": "2.0",
     })
+    # 2026-09-22: gz_ros2_control의 position_proportional_gain(순수 P, D항 없음)만 올렸더니
+    # 목표를 빠르게 연속으로 바꾸는 실사용 패턴(GUI Apply 반복)에서 진동하다가 DART 조인트
+    # 하한에서 걸려 고착되는 게 실측 재현됨(단발 점프는 성공, 연속 변경은 실패) - 조인트 자체에
+    # 점성 댐핑을 추가해 P만으로 생기는 진동을 억제(대략 임계감쇠 근처, 질량 추정치 기준).
+    ET.SubElement(lateral_joint, "dynamics", {"damping": "400", "friction": "0"})
 
     lift_joint = ET.SubElement(robot, "joint", {
         "name": PLATFORM_LIFT_JOINT, "type": "prismatic",
@@ -142,6 +147,7 @@ def _add_platform(robot: ET.Element, platform: PlatformConfig) -> None:
         "lower": f"{platform.min_z}", "upper": f"{platform.max_z}",
         "effort": "5000", "velocity": "2.0",
     })
+    ET.SubElement(lift_joint, "dynamics", {"damping": "400", "friction": "0"})
 
     mount_joint = ET.SubElement(robot, "joint", {
         "name": "platform_mount_joint", "type": "fixed",
@@ -165,15 +171,24 @@ def _add_sensor(robot: ET.Element, link_name: str, sensor_name: str) -> None:
     ray = ET.SubElement(sensor, "ray")
     scan = ET.SubElement(ray, "scan")
     horizontal = ET.SubElement(scan, "horizontal")
+    # 2026-09-22: tunnel_wall_detector_node/contact_planner_node의 FOV 크롭(±50도 수평/±25도
+    # 수직)과 raw 센서 FOV를 맞춤 - 원래 ±25도/±20도였는데, 그 크롭보다 좁아서 크롭이 사실상
+    # 아무 효과가 없었다(사용자 지적). CygLiDAR D1 실물 스펙(120도/65도)이 아니라, 지금 두
+    # 플래너가 실제로 쓰는 크롭 값(±50도/±25도)에 맞춘다.
+    # ⚠️ 첫 시도에서 샘플 수(181/81)를 그대로 두고 각도만 넓혔더니 FOV당 점 밀도가 절반으로
+    # 떨어져서, tunnel_wall_detector_node의 안정화(stability_pos_tol_m=1cm/angle_tol=2도)가
+    # 50초 넘게 전혀 수렴 못 하는 실측 회귀가 확인됨(중심 z좌표가 프레임마다 6cm씩 튐) - 원래
+    # 각도 분해능(수평 0.278도/샘플, 수직 0.5도/샘플)을 유지하도록 샘플 수를 넓어진 FOV 비율만큼
+    # 늘려서(181->361, 81->101) 복원.
     for tag, value in (
-        ("samples", "181"), ("resolution", "1"),
-        ("min_angle", "-0.436332"), ("max_angle", "0.436332"),
+        ("samples", "361"), ("resolution", "1"),
+        ("min_angle", "-0.872665"), ("max_angle", "0.872665"),
     ):
         ET.SubElement(horizontal, tag).text = value
     vertical = ET.SubElement(scan, "vertical")
     for tag, value in (
-        ("samples", "81"), ("resolution", "1"),
-        ("min_angle", "-0.349066"), ("max_angle", "0.349066"),
+        ("samples", "101"), ("resolution", "1"),
+        ("min_angle", "-0.436332"), ("max_angle", "0.436332"),
     ):
         ET.SubElement(vertical, tag).text = value
     sensor_range = ET.SubElement(ray, "range")

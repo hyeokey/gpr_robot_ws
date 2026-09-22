@@ -18,14 +18,13 @@ setup(
     maintainer_email="msol62@krri.re.kr",
     description=(
         "/lidar_1/scan_3D wall plane detection (RANSAC+SVD) and target-pose "
-        "computation, RViz-marker-only, no real-arm control topics."
+        "computation, published directly to /piper/target_pose for real-arm control."
     ),
     license="MIT",
     extras_require={"test": ["pytest"]},
     entry_points={
         "console_scripts": [
             "tunnel_wall_detector_node = tunnel_wall_detector.tunnel_wall_detector_node:main",
-            "piper_target_relay_node = tunnel_wall_detector.piper_target_relay_node:main",
         ],
     },
 )

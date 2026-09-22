@@ -11,6 +11,15 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
 
 
+# 2026-09-22 실측으로 확정된 버그 우회: 요청한 목표가 조인트의 진짜 하드 한계값과 "정확히"
+# 같아지는 순간, Gazebo/DART가 이후 어떤 새 목표를 줘도 그 조인트를 완전히 무시해버리는
+# 현상이 반복 재현됨(damping/게인 튜닝과 무관 - 값이 정확히 한계에 닿는 것 자체가 트리거).
+# DART 내부 조인트-한계 제약 처리의 문제로 추정되나 소스에 직접 접근할 수 없어 근본 수정은
+# 불가 - 대신 소프트웨어 쪽에서 절대 그 정확한 경계값을 요청하지 않도록 약간 안쪽으로만
+# clamp해서 우회한다(1cm, 사용자가 체감하는 범위에는 실질적으로 영향 없음).
+JOINT_LIMIT_SAFETY_MARGIN_M = 0.01
+
+
 class PlatformControlNode(Node):
     """SAFE SIM-ONLY continuous position holder for the movable Piper platform.
 
@@ -95,8 +104,9 @@ class PlatformControlNode(Node):
 
         raw_y = float(self.get_parameter("target_y").value)
         raw_z = float(self.get_parameter("target_z").value)
-        clamped_y = _clamp(raw_y, min_y, max_y)
-        clamped_z = _clamp(raw_z, min_z, max_z)
+        margin = JOINT_LIMIT_SAFETY_MARGIN_M
+        clamped_y = _clamp(raw_y, min_y + margin, max_y - margin)
+        clamped_z = _clamp(raw_z, min_z + margin, max_z - margin)
 
         if raw_y != clamped_y or raw_z != clamped_z:
             self.get_logger().warning(

@@ -2,6 +2,17 @@
   ros__parameters:
     update_rate: 100
 
+    # 2026-09-22: gz_ros2_control(GazeboSimSystem)이 "position" command_interface를 실제로는
+    # 내부 P게인 힘제어로 구현한다는 걸 바이너리 문자열 검색(strings libgz_ros2_control-system.so)
+    # 으로 확인 - 이 파라미터를 명시적으로 안 주면 기본값(약함)을 쓰는데, 중력이 없는
+    # platform_lateral_joint(Y)는 그 약한 기본값으로도 잘 움직였지만, 플랫폼+팔 전체 무게를
+    # 계속 들고 있어야 하는 platform_lift_joint(Z)는 그 기본값 힘으로 중력을 못 이겨서
+    # 하한(0.5m)에 그대로 눌러앉아 어떤 목표를 줘도 전혀 안 움직이는 현상으로 실측 확인됨
+    # (Y는 정상 도달, Z만 고착 - 이 비대칭이 결정적 단서). 조인트별로 따로 못 주는 전역
+    # 파라미터라 넉넉하게 올림 - articulated arm(joint1~6)에는 지금까지 이 문제가 안 보였지만,
+    # 값을 올려도 위치 오차*게인이 effort 상한(URDF의 5000N)에 걸려 안전하게 clamp됨.
+    position_proportional_gain: 2000.0
+
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
 
