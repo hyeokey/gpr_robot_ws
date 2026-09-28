@@ -50,9 +50,11 @@ wall_plane/target_pose/마커(법선 화살표·목표 구·평면 사각형)가
 법선 부호와 수평 필터는 contact_planner_node에서 실측으로 이미 검증된 것과 같은 규칙을 쓴다:
   - 부호: 법선이 "벽 -> 센서" 방향을 향하도록 정함(아직 로봇팔/tip 기준이 없으므로 센서
     원점을 기준으로 삼음 - 라이다가 1개뿐이라 "센서 쪽"이 애매하지 않음).
-  - 수평 필터: 법선이 수평에서 max_normal_tilt_from_horizontal_deg 이상 기울면(즉 천장/바닥에
-    더 가까우면) 그 프레임은 버린다 - 넓은 FOV의 아치형 터널에서 RANSAC이 벽 대신 천장/바닥을
-    잡는 오검출을 막기 위함.
+  - 수평 필터(2026-09-28부터 바닥만): 법선(부호 정규화 후, "벽/바닥/천장 -> 센서" 방향)이
+    +Z(바닥에서 올려다보는 방향)이고 수평에서 max_normal_tilt_from_horizontal_deg 이상
+    기울면 그 프레임은 버린다 - 넓은 FOV의 아치형 터널에서 RANSAC이 벽 대신 바닥을 잡는
+    오검출을 막기 위함. 법선이 -Z(천장 쪽)면 기울기와 무관하게 통과시킨다 - 판이 천장을
+    올려다보며 검사하는 시나리오도 유효한 타겟이기 때문.
 """
 import math
 
@@ -355,21 +357,27 @@ class TunnelWallDetectorNode(Node):
         normal = vh[-1]
         normal /= np.linalg.norm(normal)
 
-        # 벽은 법선이 수평에 가까워야 한다 - 아니면 천장/바닥 오검출로 보고 버림
-        # (contact_planner_node에서 실측으로 검증된 것과 동일한 필터).
-        tilt_deg = math.degrees(math.asin(min(1.0, abs(float(normal[2])))))
-        max_tilt = float(self.get_parameter("max_normal_tilt_from_horizontal_deg").value)
-        if tilt_deg > max_tilt:
-            self.get_logger().warn(
-                f"평면 법선이 너무 수직(수평에서 {tilt_deg:.0f}도 기움, 벽이 아니라 "
-                "천장/바닥으로 보임) - 이 프레임 건너뜀.",
-                throttle_duration_sec=2.0,
-            )
-            return
-
         # 부호: "벽 -> 센서" 방향(아직 로봇팔 기준이 없으므로 센서 원점을 기준으로 삼음)
         if np.dot(normal, sensor_pos_base - centroid) < 0:
             normal = -normal
+
+        # 2026-09-28 사용자 설계 변경: 원래는 법선이 수평에서 크게 기울면(|normal[2]| 큼)
+        # 방향 구분 없이 천장/바닥 둘 다 걸렀는데(contact_planner_node에서 가져온 필터 - 그
+        # 용도는 "옆벽만 본다"), 이제는 판이 천장을 올려다보며 검사하는 시나리오도 유효한
+        # 타겟이라 천장은 막으면 안 된다. 부호 정규화(위) 이후의 normal[2]는 "바닥 위에서
+        # 위를 보면 +Z(바닥->센서)", "천장 아래에서 아래를 보면 -Z(천장->센서)"로 방향이
+        # 확정되므로, 여기서 +Z(바닥으로 보이는 쪽)만 걸러내고 -Z(천장 쪽)는 기울기와
+        # 무관하게 통과시킨다.
+        if normal[2] > 0:
+            floor_tilt_deg = math.degrees(math.asin(min(1.0, float(normal[2]))))
+            max_tilt = float(self.get_parameter("max_normal_tilt_from_horizontal_deg").value)
+            if floor_tilt_deg > max_tilt:
+                self.get_logger().warn(
+                    f"평면 법선이 바닥으로 보임(수평에서 {floor_tilt_deg:.0f}도 기움) - "
+                    "이 프레임 건너뜀.",
+                    throttle_duration_sec=2.0,
+                )
+                return
 
         # 법선 스무딩(선택) - contact_planner_node와 동일한 이동평균, 마커/목표가 프레임마다
         # 미세하게 튀는 것을 완화.

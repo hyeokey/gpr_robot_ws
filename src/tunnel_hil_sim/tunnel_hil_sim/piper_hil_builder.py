@@ -256,12 +256,18 @@ def build_piper_hil_urdf(
 
     _rewrite_mesh_uris(robot, mesh_dir)
 
+    # 2026-09-28: 이게 진짜 원인이었음 - ros2_control command_interface의 min/max(위 CONTROLLED_
+    # JOINTS 루프)를 넓혀도, DART가 실제로 강제하는 건 조인트 자체의 <limit>(원래 실물 URDF의
+    # 하드웨어 스펙값, joint6은 ±120도)이라 그게 그대로면 아무 효과가 없었다. 이 <limit> 자체를
+    # 일괄 ±3.2rad(약 183도, 실물 소프트 한계보다 살짝 넉넉하게 준 값으로 추정)로 덮어쓰고
+    # 있었는데, 실물 joint6가 티칭모드에서 -282.8도까지 정상적으로 나가는 게 확인되어 그 폭조차
+    # 부족했다. ros2_control 쪽과 동일하게 ±10rad로 넓힘 - 시뮬레이션 전용이라 실물 안전과 무관.
     for joint in robot.findall("joint"):
         if joint.get("name") in CONTROLLED_JOINTS:
             limit = joint.find("limit")
             if limit is not None:
-                limit.set("lower", "-3.2")
-                limit.set("upper", "3.2")
+                limit.set("lower", "-10.0")
+                limit.set("upper", "10.0")
 
     _add_platform(robot, platform)
 
@@ -273,8 +279,15 @@ def build_piper_hil_urdf(
     for joint_name in CONTROLLED_JOINTS:
         joint = ET.SubElement(ros2_control, "joint", {"name": joint_name})
         command = ET.SubElement(joint, "command_interface", {"name": "position"})
-        ET.SubElement(command, "param", {"name": "min"}).text = "-3.2"
-        ET.SubElement(command, "param", {"name": "max"}).text = "3.2"
+        # 2026-09-28: 원래 -3.2/3.2(대략 ±180도 + 약간의 여유)로 잡았던 게, 실물 joint6가
+        # 티칭모드에서 -282.8도(약 -4.94rad)까지 정상적으로 나가는 걸 실측으로 확인 - 그 범위를
+        # 벗어난 명령이 이 command_interface의 min/max에 그대로 clamp되면서, 9/22 세션에 이미
+        # 규명한 "값이 조인트 한계에 정확히 닿으면 이후 명령을 전부 무시하는" DART 버그가 그대로
+        # 재현됨(joint6이 -3.2에 얼어붙어 안 움직임). 이건 순수 시뮬레이션 미러링용이라 실물
+        # 안전과 무관 - 넉넉하게(±10rad, 관측된 범위에 여유를 크게 둠) 넓혀서 실제로 절대 그
+        # 경계에 닿지 않게 한다.
+        ET.SubElement(command, "param", {"name": "min"}).text = "-10.0"
+        ET.SubElement(command, "param", {"name": "max"}).text = "10.0"
         ET.SubElement(joint, "state_interface", {"name": "position"})
         ET.SubElement(joint, "state_interface", {"name": "velocity"})
 
