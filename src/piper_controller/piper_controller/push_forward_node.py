@@ -83,13 +83,16 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Empty, Float64MultiArray, String
 
 GPR_ROBOT_DIR = os.path.expanduser("~/gpr_robot")
 if GPR_ROBOT_DIR not in sys.path:
     sys.path.insert(0, GPR_ROBOT_DIR)
 
-from sim_view import IK_LOWER, IK_UPPER, JOINT_NAMES, TIP_LINK_INDEX, load_ik_model  # noqa: E402
+from piper_controller.wrist_leveling import (  # noqa: E402
+    corner_wall_distances, search_wrist_correction,
+)
+from sim_view import IK_LOWER, IK_UPPER, JOINT_NAMES, load_ik_model  # noqa: E402
 
 BASE_FRAME = "base_link"
 PLATE_FRAME = "extension_plate"  # 실제 제어 기준(목표 pose)으로 삼는 프레임
@@ -133,6 +136,11 @@ STATE_IDLE = "IDLE"
 STATE_LEVEL = "LEVEL"
 STATE_PUSH = "PUSH"
 STATE_HOLD = "HOLD"
+# 2026-09-28 다구간 자동 순회 지원(publish_mode="relay" 전용, 기존 "direct" 단일-벽 워크플로우는
+# 이 상태에 절대 안 들어감) - HOLD 중 ~/next_segment_trigger를 받으면 진입, orientation 고정한
+# 채 push_distance를 0까지 역방향으로 램프(PUSH의 정확한 역순, 같은 방향고정 Cartesian
+# 메커니즘 재사용)한 뒤 모든 CAPTURE/LEVEL/PUSH 상태를 완전히 리셋하고 IDLE로 복귀한다.
+STATE_RETRACT = "RETRACT"
 
 # 2026-09-15 LEVEL 단계 (모듈 docstring 참고).
 LEVEL_SPREAD_TOL_M = 0.015  # 4개 모서리 거리 퍼짐(최대-최소)이 이 이내면 "평평해짐"
@@ -183,18 +191,23 @@ def _full_quat_angle_diff_deg(qa, qb):
     return math.degrees(2 * math.acos(w))
 
 
-def tip_pose(ik_robot, joint_indices, deg6):
-    """순수 FK(시뮬레이션만, 로봇 안 움직임) - deg6(6개, 도) 관절각에서 link6의 base_link 기준
-    pos/orn을 계산한다. piper_controller_node.tip_pose()와 동일한 패턴(별도 프로세스라 직접
-    import 대신 로컬에 둠)."""
-    for idx, d in zip(joint_indices, deg6):
-        p.resetJointState(ik_robot, idx, math.radians(d))
-    return p.getLinkState(ik_robot, TIP_LINK_INDEX, computeForwardKinematics=True)[4:6]
-
-
 class PushForwardNode(Node):
     def __init__(self):
         super().__init__("push_forward_node")
+
+        # 2026-09-28 다구간 자동 순회(tunnel_inspection_planner) 지원 추가 - 기존 단일-벽 수동
+        # 워크플로우(publish_mode="direct", 기본값)는 이 파라미터와 무관하게 100% 그대로 동작.
+        # "relay" 모드에서는 이 노드가 /piper/target_pose·/piper/target_joint_deg를 아예 안
+        # 만들고(발행 소유권 단일화, 2026-09-28 리뷰 지적사항), 입력도 /piper/locked_wall_plane
+        # (contact_planner_node/tunnel_wall_detector_node의 direct 모드 전용 - 구간 ID 없음)이
+        # 아니라 시퀀서가 구간 ID 검증 후에만 발행하는 ~/segment_wall_plane을 구독한다. 아래
+        # self.target_pub/self.joint_target_pub/self.wall_plane_sub는 클래스의 나머지 코드
+        # (콜백/틱)에서 이름 그대로 쓰이므로, 여기서 "어느 토픽을 가리키는 퍼블리셔/구독인지"만
+        # 모드에 따라 바꾸면 그 아래 로직은 전혀 손댈 필요가 없다.
+        self.declare_parameter("publish_mode", "direct")
+        self._publish_mode = str(self.get_parameter("publish_mode").value)
+        if self._publish_mode not in ("direct", "relay"):
+            raise ValueError(f"publish_mode는 'direct'/'relay'만 허용(받은 값: {self._publish_mode})")
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -222,19 +235,30 @@ class PushForwardNode(Node):
         self._level_hold_count = 0
         self._link6_pose_history = deque(maxlen=LEVEL_SETTLE_WINDOW)  # (pos, orn) - 다음 감쇠
         # 스텝을 계산할 타이밍 게이팅용(_link6_is_settled)
+        wall_plane_topic = ("/piper/locked_wall_plane" if self._publish_mode == "direct"
+                             else "~/segment_wall_plane")
         self.wall_plane_sub = self.create_subscription(
-            PoseStamped, "/piper/locked_wall_plane", self._on_wall_plane,
+            PoseStamped, wall_plane_topic, self._on_wall_plane,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.joint_state_sub = self.create_subscription(
             JointState, "/joint_states", self._on_joint_states, 10)
 
         self.contact_image_sub = self.create_subscription(
             Image, CONTACT_IMAGE_TOPIC, self._on_contact_image, 10)
-        self.target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
+        target_pose_topic = "/piper/target_pose" if self._publish_mode == "direct" else "~/relay_target_pose"
+        self.target_pub = self.create_publisher(PoseStamped, target_pose_topic, 10)
         # 2026-09-16: LEVEL(joint4/5 grid search) 전용 - Cartesian IK를 안 거치는 직접 관절각
         # 지정 경로(piper_controller_node의 JOINT_TARGET_EPS_DEG 설명 참고). PUSH는 여전히
         # target_pub(Cartesian)을 쓴다.
-        self.joint_target_pub = self.create_publisher(Float64MultiArray, "/piper/target_joint_deg", 10)
+        target_joint_topic = ("/piper/target_joint_deg" if self._publish_mode == "direct"
+                               else "~/relay_target_joint_deg")
+        self.joint_target_pub = self.create_publisher(Float64MultiArray, target_joint_topic, 10)
+
+        # relay 모드 전용 - 시퀀서가 관측 가능하도록 상태 문자열 + retract 트리거.
+        self.state_pub = self.create_publisher(String, "~/state", 10)
+        self.next_segment_sub = self.create_subscription(
+            Empty, "~/next_segment_trigger", self._on_next_segment_trigger, 10)
+
         self.timer = self.create_timer(PUSH_STEP_PERIOD_S, self._tick)
 
         push_desc = (
@@ -316,14 +340,17 @@ class PushForwardNode(Node):
 
     def _corner_wall_distances(self, corner_positions):
         """각 모서리에서 벽 평면까지 부호 있는 거리(_wall_centroid/_wall_normal 기준) - 클수록
-        벽에서 먼(안전한) 쪽."""
-        return {name: float(np.dot(pos - self._wall_centroid, self._wall_normal))
-                for name, pos in corner_positions.items()}
+        벽에서 먼(안전한) 쪽. 순수 계산부는 `wrist_leveling.corner_wall_distances()`(2026-09-28
+        에 옮김)에 위임 - 이 메서드는 인스턴스 상태(_wall_centroid/_wall_normal)를 실어나르는
+        얇은 글루."""
+        return corner_wall_distances(corner_positions, self._wall_centroid, self._wall_normal)
 
     def _capture_corner_offsets(self) -> bool:
-        """4개 모서리가 link6에 대해 갖는 고정 상대위치(로컬 프레임)를 한 번 캡처한다 - 전부
-        같은 강체(마운트 판)에 붙어있으니 이후 관절이 어떻게 움직여도 이 상대위치는 안 변한다.
-        _predicted_corner_positions()가 순수 FK 예측에 쓴다. 실패하면 False(다음 tick 재시도)."""
+        """4개 모서리가 link6에 대해 갖는 고정 상대위치(로컬 프레임)를 한 번 캡처한다(TF 조회 -
+        ROS에 결합된 코드라 `wrist_leveling.py`로 안 옮김) - 전부 같은 강체(마운트 판)에
+        붙어있으니 이후 관절이 어떻게 움직여도 이 상대위치는 안 변한다.
+        `wrist_leveling.predicted_corner_positions()`가 순수 FK 예측에 쓴다. 실패하면
+        False(다음 tick 재시도)."""
         link6 = self._lookup(BASE_FRAME, LINK6_FRAME)
         left = self._lookup(LINK6_FRAME, NORMAL_LEFT_FRAME)
         right = self._lookup(LINK6_FRAME, NORMAL_RIGHT_FRAME)
@@ -337,25 +364,13 @@ class PushForwardNode(Node):
         }
         return True
 
-    def _predicted_corner_positions(self, deg6):
-        """deg6(6개 관절각, 도) 순수 FK로 4개 모서리의 base_link 기준 위치를 예측한다(로봇 안
-        움직임) - _corner_offsets_link6(고정 상대위치)를 그 FK의 link6 pose에 적용."""
-        link6_pos, link6_orn = tip_pose(self.ik_robot, self.joint_indices, deg6)
-        rot = np.array(p.getMatrixFromQuaternion(link6_orn)).reshape(3, 3)
-        return {name: np.array(link6_pos) + rot @ offset
-                for name, offset in self._corner_offsets_link6.items()}
-
-    def _predicted_spread(self, deg6) -> float:
-        """deg6에서 예측되는 4개 모서리의 벽까지 거리 퍼짐(최대-최소, m) - 작을수록 평평함."""
-        corners = self._predicted_corner_positions(deg6)
-        distances = self._corner_wall_distances(corners)
-        return max(distances.values()) - min(distances.values())
-
     def _compute_level_target(self):
         """LEVEL 목표(관절각 6개, 도) 계산 - 2026-09-15 재설계(모듈 상단 설명 참고). joint1/2/3/6은
         지금 값 그대로 두고, joint4/5 두 개만 조합을 바꿔가며 순수 FK로 "모서리 퍼짐"이 가장
         작아지는 조합을 찾는다(grid search, 로봇 안 움직임 - WRIST_SEARCH_STEP_DEG 간격으로
-        ±WRIST_MAX_DELTA_DEG 범위).
+        ±WRIST_MAX_DELTA_DEG 범위). 탐색 루프 자체는 2026-09-28에
+        `wrist_leveling.search_wrist_correction()`(순수 함수)로 옮겼고, 이 메서드는 baseline
+        선택 + TF 캡처(둘 다 ROS 결합)만 담당하는 글루 코드다.
 
         2026-09-16: 찾은 조합을 Cartesian pose로 바꿔서 /piper/target_pose(Cartesian IK 경로)로
         보내던 걸 그만뒀다 - 그 IK가 요청 안 한 joint2/3/6까지 사이클마다 최대 0.9도씩 같이
@@ -385,27 +400,15 @@ class PushForwardNode(Node):
             list(self._level_target_deg6) if self._level_target_deg6 is not None
             else list(self.current_joint_deg)
         )
-        baseline_spread = self._predicted_spread(baseline_deg6)
-
-        deltas = np.arange(-WRIST_MAX_DELTA_DEG, WRIST_MAX_DELTA_DEG + 1e-6, WRIST_SEARCH_STEP_DEG)
+        joint_lower_deg = [math.degrees(r) for r in IK_LOWER[:6]]
+        joint_upper_deg = [math.degrees(r) for r in IK_UPPER[:6]]
+        best_deg6, baseline_spread, best_spread = search_wrist_correction(
+            self.ik_robot, self.joint_indices, self._corner_offsets_link6,
+            self._wall_centroid, self._wall_normal, baseline_deg6,
+            WRIST_JOINT_INDICES, WRIST_SEARCH_STEP_DEG, WRIST_MAX_DELTA_DEG,
+            joint_lower_deg, joint_upper_deg,
+        )
         j4_idx, j5_idx = WRIST_JOINT_INDICES
-        j4_lo, j4_hi = math.degrees(IK_LOWER[j4_idx]), math.degrees(IK_UPPER[j4_idx])
-        j5_lo, j5_hi = math.degrees(IK_LOWER[j5_idx]), math.degrees(IK_UPPER[j5_idx])
-
-        best_spread, best_deg6 = baseline_spread, None
-        for d4 in deltas:
-            j4 = baseline_deg6[j4_idx] + d4
-            if not (j4_lo <= j4 <= j4_hi):
-                continue
-            for d5 in deltas:
-                j5 = baseline_deg6[j5_idx] + d5
-                if not (j5_lo <= j5 <= j5_hi):
-                    continue
-                candidate = list(baseline_deg6)
-                candidate[j4_idx], candidate[j5_idx] = j4, j5
-                spread = self._predicted_spread(candidate)
-                if spread < best_spread:
-                    best_spread, best_deg6 = spread, candidate
 
         if best_deg6 is None:
             self.get_logger().warn(
@@ -490,6 +493,38 @@ class PushForwardNode(Node):
         )
         return True
 
+    def _on_next_segment_trigger(self, _msg: Empty) -> None:
+        """relay 모드 전용 - HOLD 중에만 유효. RETRACT로 전환해 이탈을 시작한다(다른 상태에서
+        오면 무시 - 이탈 도중 또 이탈을 시작하거나, 아직 정렬/접근도 안 끝났는데 이탈하는 등
+        엉뚱한 상태 전이를 막기 위함)."""
+        if self.state != STATE_HOLD:
+            self.get_logger().warn(
+                f"~/next_segment_trigger 수신했지만 현재 상태가 HOLD가 아님({self.state}) - 무시.")
+            return
+        self.push_distance = min(self.push_distance, MAX_PUSH_DISTANCE_M)  # 안전상 상한 이내로만
+        self.state = STATE_RETRACT
+        self._link6_pose_history.clear()
+        self._log_milestone("이탈(RETRACT) 시작 - 판을 standoff까지 후진합니다")
+
+    def _full_reset(self) -> None:
+        """RETRACT 완료 -> IDLE 복귀 시 CAPTURE/LEVEL/PUSH가 건드리는 인스턴스 상태를 전부
+        초기값으로 되돌린다. 부분 리셋은 다음 구간이 이전 벽의 잔여 보정값(특히
+        _level_target_deg6 - "고정된 목표" 전제가 깨짐) 위에서 시작하는 잠복 버그가 되므로,
+        __init__에서 선언한 것과 정확히 같은 필드 집합을 전부 나열한다(2026-09-28 리뷰
+        지적사항 - 구현 시점에 __init__을 다시 읽어 빠짐없이 확인할 것)."""
+        self._corner_offsets_link6 = None
+        self.plate_pos0 = None
+        self.plate_orn0 = None
+        self.push_dir = None
+        self._t_plate_to_link6_pos = None
+        self._t_plate_to_link6_orn = None
+        self.push_distance = 0.0
+        self._wall_centroid = None
+        self._wall_normal = None
+        self._level_target_deg6 = None
+        self._level_hold_count = 0
+        self._link6_pose_history.clear()
+
     def _tick(self):
         # 2026-09-15 실측 사고 대응: 벽 평면을 받자마자 바로 LEVEL을 시작했더니, 사용자가
         # 아직 contact_planner_node를 끄기 전이라 그쪽도 여전히 /piper/target_pose에
@@ -501,15 +536,22 @@ class PushForwardNode(Node):
         # 매 tick) 아무것도 발행하지 않고 대기한다 - state/캡처된 값은 그대로 유지되니 다른
         # 발행자가 사라지면 자동으로 이어서 진행된다. count_publishers는 자기 자신도 포함해서
         # 세므로 1 초과면 "남이 더 있다"는 뜻.
-        other_publishers = self.count_publishers("/piper/target_pose") - 1
+        # "relay" 모드에서는 이 노드가 /piper/target_pose를 아예 안 만들고 자기 전용 릴레이
+        # 토픽(~/relay_target_pose)만 쓰므로, 이 자기 점검도 실제로 발행하는 토픽 기준으로
+        # 한다(더 이상 안전 경계 역할은 아님 - 그 역할은 "relay 모드에선 이 토픽 자체를 아무도
+        # 안 만든다"는 구조가 담당, tunnel_wall_detector_node/segment_sequencer_node 참고).
+        target_pose_topic = self.target_pub.topic_name
+        other_publishers = self.count_publishers(target_pose_topic) - 1
         if other_publishers > 0:
             self.get_logger().warn(
-                f"/piper/target_pose에 이 노드 말고도 다른 발행자가 {other_publishers}개 "
+                f"{target_pose_topic}에 이 노드 말고도 다른 발행자가 {other_publishers}개 "
                 "있습니다(contact_planner_node 등) - 충돌 방지를 위해 아무것도 발행하지 "
                 "않고 대기합니다. 그 노드를 꺼주세요(Ctrl+C).",
                 throttle_duration_sec=2.0,
             )
             return
+
+        self.state_pub.publish(String(data=self.state))
 
         if self.state == STATE_IDLE:
             if self._wall_centroid is None:
@@ -584,6 +626,16 @@ class PushForwardNode(Node):
                     f"이동 완료 - 안전 상한 {MAX_PUSH_DISTANCE_M * 100:.0f}cm 도달, 정지(HOLD)")
             else:
                 self.push_distance = min(MAX_PUSH_DISTANCE_M, self.push_distance + PUSH_STEP_M)
+
+        if self.state == STATE_RETRACT:
+            # PUSH의 정확한 역순 - orientation은 여전히 plate_orn0으로 고정한 채 push_distance만
+            # 0까지 줄인다(같은 방향고정 Cartesian 메커니즘을 그대로 재사용, 새 로직 없음).
+            if self.push_distance <= 0.0:
+                self._log_milestone("이탈(RETRACT) 완료 - 다음 구간 대기(IDLE)")
+                self._full_reset()
+                self.state = STATE_IDLE
+                return  # plate_pos0 등이 전부 None이 됐으니 아래 발행 블록으로 내려가면 안 됨
+            self.push_distance = max(0.0, self.push_distance - PUSH_STEP_M)
 
         # PUSH든 HOLD든 매 tick 발행 - HOLD 중엔 push_distance가 안 바뀌니 같은 목표를 계속
         # 재발행하는 셈(piper_controller_node의 TARGET_TIMEOUT_S=1초에 stale 처리 안 되게).

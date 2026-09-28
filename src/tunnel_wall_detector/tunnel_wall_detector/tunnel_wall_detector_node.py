@@ -66,6 +66,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
+from tunnel_inspection_interfaces.msg import RearmRequest, SegmentLockEvent
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header
@@ -229,10 +230,23 @@ class TunnelWallDetectorNode(Node):
         self.declare_parameter("stability_window", 15)
         self.declare_parameter("stability_pos_tol_m", 0.01)
         self.declare_parameter("stability_angle_tol_deg", 2.0)
+        # 2026-09-28 다구간 자동 순회(tunnel_inspection_planner) 지원 추가 - 기존 단일-벽 수동
+        #워크플로우(publish_mode="direct", 기본값)는 이 파라미터들과 무관하게 100% 그대로 동작.
+        # "relay" 모드에서는 이 노드가 /piper/target_pose, /piper/locked_wall_plane을 아예 안
+        # 만든다(발행 소유권을 segment_sequencer_node 하나로 구조적으로 단일화하기 위함 -
+        # 2026-09-28 리뷰 지적사항: "여러 발행자가 동시에 존재할 수 있는 구조를 아예 만들지
+        # 말라") - 대신 LOCK마다 구간 ID를 포함한 SegmentLockEvent를 한 번만 발행하고,
+        # segment_sequencer_node가 그 ID를 검증한 뒤에야 실제 제어 토픽으로 릴레이한다.
+        self.declare_parameter("publish_mode", "direct")  # "direct" | "relay"
+        self.declare_parameter("roi_default_radius_m", 0.3)
 
         self._rng = np.random.default_rng()
         self._smoothed_normal = None
         self._stability_history = []
+        self._current_segment_id = None  # relay 모드 전용 - RearmRequest로 갱신
+        self._roi_center_base = None      # relay 모드 전용 - None이면 ROI 필터 완전 단락(기존
+        # 단일-벽 동작과 100% 동일한 코드 경로 유지, "힌트 없으면 필터 자체를 안 거침" 원칙)
+        self._roi_radius_m = None
         # 2026-09-21 사용자 요청: 안정화(위 stability_* 설명)로 처음 값이 나오면, 그 뒤로는
         # contact_planner_node의 LOCK처럼 그 값을 영구히 고정하고 더는 LiDAR로 다시 계산하지
         # 않는다(재시작해야 다시 잡음). wall_cloud만 계속 라이브로 발행 - 진단용으로 벽이
@@ -250,17 +264,35 @@ class TunnelWallDetectorNode(Node):
         self.wall_cloud_pub = self.create_publisher(PointCloud2, "/perception/wall_cloud", 10)
         self.wall_plane_pub = self.create_publisher(PoseStamped, "/perception/wall_plane", 10)
         self.target_pose_pub = self.create_publisher(PoseStamped, "/perception/target_pose", 10)
-        # 2026-09-22: piper_target_relay_node 삭제, 실물 제어 발행을 이 노드로 직접 합침
-        # (모듈 docstring 참고) - contact_planner_node와 동일하게 이 토픽에 직접 발행한다.
-        self.piper_target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
         self.marker_pub = self.create_publisher(MarkerArray, "/perception/markers", 10)
-        # 2026-09-21: push_forward_node(원래 contact_planner_node와 짝을 이루던 기존 노드)가
-        # 구독하는 것과 동일한 토픽/QoS/메시지 포맷 - contact_planner_node.py:408-410,748을 그대로
-        # 재사용. LOCK 순간 딱 한 번만 발행(contact_planner_node와 동일 패턴) - TRANSIENT_LOCAL이라
-        # push_forward_node가 이 노드보다 늦게 떠도 마지막 값을 받는다.
-        self.locked_plane_pub = self.create_publisher(
-            PoseStamped, "/piper/locked_wall_plane",
-            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+
+        self._publish_mode = str(self.get_parameter("publish_mode").value)
+        if self._publish_mode not in ("direct", "relay"):
+            raise ValueError(f"publish_mode는 'direct'/'relay'만 허용(받은 값: {self._publish_mode})")
+
+        self.piper_target_pub = None
+        self.locked_plane_pub = None
+        self.segment_lock_event_pub = None
+        if self._publish_mode == "direct":
+            # 2026-09-22: piper_target_relay_node 삭제, 실물 제어 발행을 이 노드로 직접 합침
+            # (모듈 docstring 참고) - contact_planner_node와 동일하게 이 토픽에 직접 발행한다.
+            self.piper_target_pub = self.create_publisher(PoseStamped, "/piper/target_pose", 10)
+            # 2026-09-21: push_forward_node(원래 contact_planner_node와 짝을 이루던 기존 노드)가
+            # 구독하는 것과 동일한 토픽/QoS/메시지 포맷 - contact_planner_node.py:408-410,748을
+            # 그대로 재사용. LOCK 순간 딱 한 번만 발행(contact_planner_node와 동일 패턴) -
+            # TRANSIENT_LOCAL이라 push_forward_node가 이 노드보다 늦게 떠도 마지막 값을 받는다.
+            self.locked_plane_pub = self.create_publisher(
+                PoseStamped, "/piper/locked_wall_plane",
+                QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        else:
+            # relay 모드: 실제 제어 토픽은 이 노드가 아예 만들지 않는다(2026-09-28 리뷰 지적사항 -
+            # "발행 소유권을 하나로 통합") - segment_sequencer_node가 구간 ID 검증 후에만 실제
+            # 제어 토픽으로 릴레이한다.
+            self.segment_lock_event_pub = self.create_publisher(
+                SegmentLockEvent, "~/segment_lock_event",
+                QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            self.rearm_sub = self.create_subscription(
+                RearmRequest, "~/rearm_request", self._on_rearm_request, 10)
 
         input_topic = str(self.get_parameter("input_topic").value)
         # /lidar_1/scan_3D는 Best Effort로 발행됨(sim_pointcloud_adapter가 qos_profile_sensor_data
@@ -269,10 +301,15 @@ class TunnelWallDetectorNode(Node):
             PointCloud2, input_topic, self._on_cloud, qos_profile_sensor_data
         )
 
-        self.get_logger().warn(
+        mode_desc = (
             "⚠️ /piper/target_pose 발행이 활성화되어 있습니다 - 유효한 평면이 검출되는 즉시 "
-            "piper_controller_node가 실제로 팔을 그쪽으로 움직입니다(속도 상한 램프, 게이트 "
-            f"없음). 입력={input_topic}, 참고용 출력=/perception/wall_cloud, "
+            "piper_controller_node가 실제로 팔을 그쪽으로 움직입니다(속도 상한 램프, 게이트 없음)."
+            if self._publish_mode == "direct" else
+            "relay 모드 - 실제 제어 토픽(/piper/target_pose 등)은 이 노드가 발행하지 않음. "
+            "~/rearm_request로 재무장 대기 중."
+        )
+        self.get_logger().warn(
+            f"{mode_desc} 입력={input_topic}, 참고용 출력=/perception/wall_cloud, "
             "/perception/wall_plane, /perception/target_pose, /perception/markers."
         )
 
@@ -289,6 +326,39 @@ class TunnelWallDetectorNode(Node):
         t = tf_stamped.transform.translation
         r = tf_stamped.transform.rotation
         return [t.x, t.y, t.z], [r.x, r.y, r.z, r.w]
+
+    def _on_rearm_request(self, msg: RearmRequest) -> None:
+        """relay 모드 전용 - segment_sequencer_node가 다음 구간으로 넘어갈 때마다 보낸다.
+        LOCK 상태를 완전히 초기화해서(재시작 없이) 새 구간을 다시 검출할 수 있게 하고, ROI
+        힌트(예측 표면점 근방)를 설정한다 - "아치 전체에 평면 하나를 피팅하거나 우연히 보이는
+        가장 큰 평면을 무조건 목표로 선택하지 말라"는 요구사항을 만족하려면 항상 이 힌트로
+        범위를 좁혀야 한다."""
+        base_frame = str(self.get_parameter("base_frame").value)
+        if msg.roi_center.header.frame_id and msg.roi_center.header.frame_id != base_frame:
+            self.get_logger().error(
+                f"RearmRequest.roi_center의 frame_id({msg.roi_center.header.frame_id})가 "
+                f"base_frame({base_frame})과 다름 - 시퀀서가 이미 base_frame으로 변환해서 "
+                "보내야 함(이 노드는 ROI 힌트 자체를 TF로 재변환하지 않음). 이번 rearm은 무시.")
+            return
+
+        self._current_segment_id = int(msg.segment_id)
+        self._roi_center_base = np.array([
+            msg.roi_center.point.x, msg.roi_center.point.y, msg.roi_center.point.z])
+        self._roi_radius_m = float(msg.roi_radius_m)
+
+        self._locked_centroid = None
+        self._locked_normal = None
+        self._locked_inliers = None
+        self._locked_target_pos = None
+        self._locked_target_orn = None
+        self._stability_history = []
+        self._smoothed_normal = None
+
+        self.get_logger().warn(
+            f"재무장(segment_id={self._current_segment_id}) - ROI 중심="
+            f"{np.round(self._roi_center_base, 3)} 반경={self._roi_radius_m:.2f}m. LOCK "
+            "상태 초기화 완료, 새 구간 검출 시작."
+        )
 
     def _on_cloud(self, msg: PointCloud2) -> None:
         points_local = point_cloud2.read_points_numpy(
@@ -336,6 +406,22 @@ class TunnelWallDetectorNode(Node):
         rot_matrix = quat_to_matrix(lidar_orn)
         points_base = points_local @ rot_matrix.T + np.array(lidar_pos)
         sensor_pos_base = np.array(lidar_pos)
+
+        # 2.7) ROI 필터(relay 모드, 힌트 있을 때만) - "아치 전체 포인트에 평면 하나를 피팅하거나
+        # 우연히 보이는 가장 큰 평면을 무조건 목표로 선택하지 말라"는 요구사항 대응. 힌트가
+        # 없으면(_roi_center_base is None) 완전 단락 - 기존 단일-벽 동작과 100% 동일한 코드
+        # 경로를 그대로 통과한다("거대 반경 기본값" 방식 금지, 2026-09-28 리뷰 지적사항).
+        if self._roi_center_base is not None and points_base.shape[0] > 0:
+            dist_to_roi = np.linalg.norm(points_base - self._roi_center_base, axis=1)
+            points_base = points_base[dist_to_roi <= self._roi_radius_m]
+
+        min_points_after_roi = int(self.get_parameter("min_points").value)
+        if points_base.shape[0] < min_points_after_roi:
+            self.get_logger().warn(
+                f"ROI 필터 후 점 수 부족({points_base.shape[0]} < {min_points_after_roi}) - "
+                "이 프레임 건너뜀.", throttle_duration_sec=2.0,
+            )
+            return
 
         # 3) RANSAC
         ransac_thresh = float(self.get_parameter("ransac_thresh_m").value)
@@ -401,7 +487,8 @@ class TunnelWallDetectorNode(Node):
                 self._locked_target_pos, self._locked_target_orn, base_frame, stamp
             )
             self.target_pose_pub.publish(locked_target_msg)
-            self.piper_target_pub.publish(locked_target_msg)
+            if self.piper_target_pub is not None:  # "direct" 모드에서만(relay는 이 토픽 미보유)
+                self.piper_target_pub.publish(locked_target_msg)
             self._publish_markers(
                 self._locked_inliers, self._locked_centroid, self._locked_normal,
                 self._locked_target_pos, base_frame, stamp, locked=True,
@@ -463,7 +550,6 @@ class TunnelWallDetectorNode(Node):
         self._publish_wall_plane(stable_contact_point, stable_normal, base_frame, stamp)
         target_msg = self._make_target_pose_msg(target_pos, target_orn, base_frame, stamp)
         self.target_pose_pub.publish(target_msg)
-        self.piper_target_pub.publish(target_msg)
         self._publish_markers(
             inlier_points, stable_contact_point, stable_normal, target_pos, base_frame, stamp,
             locked=True,
@@ -479,7 +565,19 @@ class TunnelWallDetectorNode(Node):
          locked_plane_msg.pose.orientation.z, locked_plane_msg.pose.orientation.w) = (
             quat_from_z_axis(stable_normal)
         )
-        self.locked_plane_pub.publish(locked_plane_msg)
+
+        if self._publish_mode == "direct":
+            self.piper_target_pub.publish(target_msg)
+            self.locked_plane_pub.publish(locked_plane_msg)
+        else:
+            # relay 모드: 실제 제어 토픽 대신, 구간 ID를 실어 시퀀서에게만 알린다(1번 - 발행
+            # 소유권 단일화). 이 노드는 이후 이 segment_id에 대해서는 더 이상 아무것도 안 함
+            # (재무장 전까지 위 "LOCK 유지" 분기가 wall_cloud만 계속 발행).
+            event = SegmentLockEvent()
+            event.segment_id = int(self._current_segment_id) if self._current_segment_id is not None else -1
+            event.target_pose = target_msg
+            event.plane_pose = locked_plane_msg
+            self.segment_lock_event_pub.publish(event)
 
         self.get_logger().warn(
             f"평면 검출 LOCK. 접촉점=({stable_contact_point[0]:.3f},{stable_contact_point[1]:.3f},"

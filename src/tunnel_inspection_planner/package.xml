@@ -1,24 +1,25 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>tunnel_wall_detector</name>
+  <name>tunnel_inspection_planner</name>
   <version>0.1.0</version>
   <description>
-    /lidar_1/scan_3D에서 터널 벽면을 RANSAC+SVD로 검출해 목표 자세를 계산하고
-    RViz Marker로만 표시하는 인식 전용 노드. 실물 로봇팔 제어 토픽은 발행하지 않음
-    (perception-only 1단계 - 사람이 결과를 확인한 뒤에야 다음 단계에서 로봇팔 제어와 연결).
+    터널 아치 전체(+Y 측벽 3m -> 아치 -> 천장 -> -Y 측벽 3m)를 빠짐없이 덮는 다구간 검사
+    경로를 자동 생성하고, 각 웨이포인트에서 플랫폼 Y/Z + 팔 관절각 도달성을 5중 기준(IK/
+    관절여유, 플랫폼 충돌, 팔-터널 충돌, 예상 정렬 품질, 관절 하드리밋)으로 판정하는
+    읽기 전용 dry-run 노드. 실물/시뮬 제어 토픽에는 미접촉(실물 팔에 명령 안 함).
   </description>
   <maintainer email="msol62@krri.re.kr">hyeokey</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
-  <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>tf2_ros</depend>
+  <depend>piper_controller</depend>
   <depend>tunnel_inspection_interfaces</depend>
-  <!-- numpy는 시스템 파이썬에 이미 있음(피더 컨트롤러용 venv 불필요) - pyransac3d/pybullet은
-       일부러 안 씀(자체 numpy RANSAC/쿼터니언 구현) -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
