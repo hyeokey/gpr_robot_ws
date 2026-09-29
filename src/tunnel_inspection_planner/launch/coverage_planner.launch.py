@@ -18,7 +18,10 @@ VENV_PYTHON = os.path.expanduser("~/gpr_robot/.venv/bin/python3")
 
 def generate_launch_description() -> LaunchDescription:
     args = [
-        DeclareLaunchArgument("x_fixed_m", default_value="2.5"),
+        # x_fixed_m: world 프레임에서 base_link의 X 좌표.
+        # - 실물 팔 / RViz(/tf 트리): base_link = world 원점 → 0.0
+        # - Gazebo HIL(spawn_x=2.5, /sim/tf 트리): 2.5
+        DeclareLaunchArgument("x_fixed_m", default_value="0.0"),
         DeclareLaunchArgument("spawn_y0_m", default_value="0.0"),
         DeclareLaunchArgument("spawn_z0_m", default_value="0.0"),
         DeclareLaunchArgument("platform_min_y", default_value="-4.0"),

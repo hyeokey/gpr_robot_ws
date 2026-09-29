@@ -35,7 +35,9 @@ class CoveragePlannerNode(Node):
     def __init__(self):
         super().__init__("coverage_planner_node")
 
-        self.declare_parameter("x_fixed_m", 2.5)       # 터널 단면 X 좌표(플랫폼 스폰 X와 맞출 것)
+        # x_fixed_m: world 프레임에서 base_link의 X 좌표.
+        # 실물 팔(RViz /tf): base_link = world 원점 → 0.0  /  Gazebo HIL: spawn_x(보통 2.5)
+        self.declare_parameter("x_fixed_m", 0.0)
         self.declare_parameter("spawn_y0_m", 0.0)
         self.declare_parameter("spawn_z0_m", 0.0)
         self.declare_parameter("panel_height_m", 0.30)  # 판떼기 세로 치수(m) - θ_min 기준
