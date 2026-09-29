@@ -25,7 +25,6 @@ from tunnel_inspection_planner.plate_geometry import (
     PlateGeometry, link6_target_from_front_face_target, load_plate_geometry,
 )
 from tunnel_inspection_planner.tunnel_collision_bodies import build_tunnel_collision_bodies
-from tunnel_inspection_planner.waypoint_coverage import Waypoint
 
 import os
 import sys
@@ -98,7 +97,7 @@ class CandidateSolution:
 
 @dataclass
 class WaypointResult:
-    waypoint: Waypoint
+    waypoint: object  # ArchWaypoint (arch_waypoints.py) — position_world/normal_world 필드 필요
     reachable: bool
     platform_y: Optional[float] = None
     platform_z: Optional[float] = None
@@ -337,7 +336,7 @@ def _search_candidates(ctx: SolverContext, target_pos_world, target_orn, target_
 
 # ---------------------------------------------------------------- 메인 진입점 -------------------
 
-def solve_waypoint(ctx: SolverContext, waypoint: Waypoint, prev_result: Optional[WaypointResult],
+def solve_waypoint(ctx: SolverContext, waypoint, prev_result: Optional[WaypointResult],
                     target_standoff_m: float = 0.06, observation_standoff_m: float = 0.4,
                     top_k: int = 10) -> WaypointResult:
     front_face_pos = waypoint.position_world + waypoint.normal_world * target_standoff_m
@@ -414,7 +413,7 @@ def solve_waypoint(ctx: SolverContext, waypoint: Waypoint, prev_result: Optional
     )
 
 
-def _predicted_corner_spread_m_for_waypoint(ctx: SolverContext, joint_deg6, waypoint: Waypoint) -> float:
+def _predicted_corner_spread_m_for_waypoint(ctx: SolverContext, joint_deg6, waypoint) -> float:
     joint_lower_deg = [math.degrees(r) for r in IK_LOWER[:6]]
     joint_upper_deg = [math.degrees(r) for r in IK_UPPER[:6]]
     # dry-run: 실측 LiDAR 벽 평면이 없으므로 이 웨이포인트의 명목 표면점+법선을 "가정한 벽

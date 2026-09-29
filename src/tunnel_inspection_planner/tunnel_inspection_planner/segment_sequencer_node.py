@@ -28,7 +28,7 @@ from tunnel_inspection_interfaces.msg import RearmRequest, SegmentLockEvent
 
 from tunnel_inspection_planner import platform_arm_solver as solver
 from tunnel_inspection_planner import tunnel_geometry as geom
-from tunnel_inspection_planner.waypoint_coverage import generate_coverage_waypoints
+from tunnel_inspection_planner.arch_waypoints import generate_arch_waypoints
 
 STAGE_MOVE_OBSERVATION = "MOVE_OBSERVATION"
 STAGE_WAIT_OBSERVATION_ARRIVAL = "WAIT_OBSERVATION_ARRIVAL"
@@ -50,8 +50,7 @@ class SegmentSequencerNode(Node):
         self.declare_parameter("x_fixed_m", 2.5)
         self.declare_parameter("spawn_y0_m", 0.0)
         self.declare_parameter("spawn_z0_m", 0.0)
-        self.declare_parameter("plate_effective_width_m", 0.18)
-        self.declare_parameter("overlap_fraction", 0.3)
+        self.declare_parameter("panel_height_m", 0.30)  # 판떼기 세로 치수(m) - θ_min 기준
         self.declare_parameter("target_standoff_m", 0.06)
         self.declare_parameter("observation_standoff_m", 0.4)
         self.declare_parameter("pos_arrival_tol_m", 0.005)  # piper_controller_node.POS_ARRIVAL_TOL_M과 동일
@@ -254,13 +253,11 @@ class SegmentSequencerNode(Node):
 
     def _start_run(self):
         x_fixed_m = float(self.get_parameter("x_fixed_m").value)
-        self._waypoints = generate_coverage_waypoints(
-            x_fixed_m,
-            plate_effective_width_m=float(self.get_parameter("plate_effective_width_m").value),
-            overlap_fraction=float(self.get_parameter("overlap_fraction").value),
-        )
+        panel_height_m = float(self.get_parameter("panel_height_m").value)
+        self._waypoints = generate_arch_waypoints(x_fixed_m, panel_height_m)
         self.get_logger().warn(
-            f"자동 순회 시작 - 웨이포인트 {len(self._waypoints)}개. 실물 팔이 실제로 움직입니다."
+            f"자동 순회 시작 - 각도 기반 웨이포인트 {len(self._waypoints)}개 "
+            f"(panel_height={panel_height_m*100:.0f}cm). 실물 팔이 실제로 움직입니다."
         )
         self._solver_ctx = solver.build_solver_context(x_fixed_m)
         self._waypoint_idx = 0

@@ -25,8 +25,7 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("platform_max_y", default_value="4.0"),
         DeclareLaunchArgument("platform_min_z", default_value="0.5"),
         DeclareLaunchArgument("platform_max_z", default_value="7.0"),
-        DeclareLaunchArgument("plate_effective_width_m", default_value="0.18"),
-        DeclareLaunchArgument("overlap_fraction", default_value="0.3"),
+        DeclareLaunchArgument("panel_height_m", default_value="0.30"),  # 판떼기 세로 치수
         DeclareLaunchArgument("target_standoff_m", default_value="0.06"),
         DeclareLaunchArgument("observation_standoff_m", default_value="0.4"),
         DeclareLaunchArgument("arm_collision_margin_m", default_value="0.03"),
@@ -40,7 +39,7 @@ def generate_launch_description() -> LaunchDescription:
 
     param_names = (
         "x_fixed_m", "spawn_y0_m", "spawn_z0_m", "platform_min_y", "platform_max_y",
-        "platform_min_z", "platform_max_z", "plate_effective_width_m", "overlap_fraction",
+        "platform_min_z", "platform_max_z", "panel_height_m",
         "target_standoff_m", "observation_standoff_m", "arm_collision_margin_m",
         "corner_spread_tol_m", "planner_margin_reachable_deg", "base_frame",
         "spawn_roll_rad", "spawn_pitch_rad", "spawn_yaw_rad",
