@@ -196,6 +196,21 @@ def _launch_setup(context, *args, **kwargs):
             ],
             remappings=[("joint_states", "/joint_states")],
         ),
+        # 2026-09-29: /joint_states 발행자가 없으면(피더 컨트롤러/브릿지 둘 다 안 떠 있으면)
+        # 위 piper_rviz_state_publisher가 구독할 게 없어 TF가 끊긴 채로 남는 문제가 여러
+        # 세션에 걸쳐 반복 재현됐다(CLAUDE.md 9/22, 9/28, 9/29 세션 등) - 매번 손으로
+        # 따로 띄워야 했던 걸 기본으로 같이 띄운다. 이 브릿지는 piper_controller_node가
+        # 이미 떠서 /joint_states를 발행 중이면 자동으로 양보하므로(count_publishers>1이면
+        # 스스로 발행 안 함, joint_state_bridge.py 자체 로직) 항상 같이 켜둬도 안전하다.
+        # `~/gpr_robot/robot_state_reader.py`(CAN 리더)가 robot_state.json을 갱신 중이어야
+        # 실제 값이 나온다 - 그것까지 이 launch가 대신 띄워주진 않음(별도 워크스페이스/venv).
+        Node(
+            package="piper_description",
+            executable="joint_state_bridge.py",
+            name="piper_joint_state_bridge",
+            output="screen",
+            condition=IfCondition(LaunchConfiguration("start_joint_state_bridge")),
+        ),
         Node(
             package="ros_gz_sim",
             executable="create",
@@ -333,6 +348,16 @@ def generate_launch_description() -> LaunchDescription:
                 "publish_rviz_tf",
                 default_value="true",
                 description="Publish the real /joint_states tree on /tf for RViz",
+            ),
+            DeclareLaunchArgument(
+                "start_joint_state_bridge",
+                default_value="true",
+                description=(
+                    "Also launch piper_joint_state_bridge (piper_description) so /joint_states "
+                    "has a publisher even when piper_controller_node isn't up - it defers "
+                    "automatically once piper_controller_node's own /joint_states publisher "
+                    "appears, so it's safe to leave on."
+                ),
             ),
             DeclareLaunchArgument(
                 "piper_urdf",
