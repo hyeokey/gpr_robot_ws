@@ -1025,3 +1025,85 @@ joint1~5는 정상 미러링되는데 **joint6만 얼어있음**(Gazebo 쪽 `-3.
 2. **바닥 필터 임계값(`max_normal_tilt_from_horizontal_deg`=35°)이 천장 시나리오에도 여전히
    적절한지 재검토** - 이번엔 84° 기움(사실상 거의 수평 천장)에서 잘 통과했지만, 더 완만하게
    기운 천장/아치 구간에서도 의도대로 동작하는지는 아직 다양한 각도로 시험 안 함.
+
+---
+
+## 2026-09-29 작업 기록
+
+### 1. 커버리지 플래너: LiDAR 기반 → 각도 기반 사전 계산 타깃으로 전면 교체 (커밋 `bf6d69b`)
+
+**배경**: 판떼기(가로 50cm = extension_plate 30cm + 마운트 20cm, 세로 30cm)로 반원 아치 전체를
+커버하는 타깃점을 LiDAR 실시간 평면 검출 없이 순수 기하학만으로 사전 계산하는 방식으로 교체.
+기존 `waypoint_coverage.py`(16개 facet × 여러 sub-waypoint)를 버리고 새 방식으로 전면 갈아엎음
+(test 브랜치에만 적용, main 무관).
+
+**핵심 수학**:
+- 판떼기 세로 치수 0.30m, 아치 반지름 4.0m
+- θ_min = 0.30 / 4.0 = 0.075 rad ≈ **4.286°** (호 길이 기준)
+- N = ceil(π / θ_min) = **42 구간**, 타깃 **43개** (θ=0°…180°)
+- 실제 각도 간격: 180°/42 = 4.286°, 호 길이 = 4.0 × 4.286° × π/180° ≈ **29.9 cm** ≈ 30 cm ✓
+
+**신규 파일 `arch_waypoints.py`** (`tunnel_inspection_planner` 패키지):
+- `ArchWaypoint` 데이터클래스: `index`, `theta_deg`, `position_world`(아치 원 위 표면점),
+  `normal_world`(inward 법선). `position_world`는 standoff 전 표면점 - `platform_arm_solver.
+  solve_waypoint()`가 여기서 `standoff_m * normal`을 더해 최종 타깃 계산.
+- `compute_num_positions(panel_height_m, arch_radius_m)` → N
+- `generate_arch_waypoints(x_fixed_m, panel_height_m=0.30)` → 43개 `ArchWaypoint` 목록
+- 기존 facet 다각형(16각형 근사) 대신 순수 원 공식으로 표면점 계산
+
+**수정된 파일**:
+- `coverage_planner_node.py`: `plate_effective_width_m`/`overlap_fraction` → `panel_height_m`
+  단일 파라미터, 시각화 마커를 facet 다각형에서 64분할 원호로 교체. 로그도
+  facet/sub 인덱스 대신 θ(도)로 표시.
+- `segment_sequencer_node.py`: `generate_coverage_waypoints` → `generate_arch_waypoints`,
+  파라미터 동일하게 정리.
+- `platform_arm_solver.py`: `waypoint_coverage.Waypoint` 타입 힌트 제거(duck-typed 대응).
+  `solve_waypoint()` 및 내부 함수들의 `waypoint` 인자 타입을 `object`/무타입으로 완화 -
+  `position_world`/`normal_world` 필드만 있으면 동작하므로 `ArchWaypoint`와 호환됨.
+- `coverage_planner.launch.py`: `plate_effective_width_m`/`overlap_fraction` →
+  `panel_height_m:=0.30` 인자로 교체.
+
+**IK 도달성 검증은 기존 `platform_arm_solver` 그대로 재사용** - `ArchWaypoint`가
+`position_world`/`normal_world` 두 필드만 갖고 있으면 `solve_waypoint()`에 그대로 넘길 수 있음.
+`waypoint_coverage.py` 파일 자체는 남겨뒀지만 아무도 import 안 함(삭제 가능).
+
+### 2. `x_fixed_m` 기본값 2.5 → 0.0 수정 (커밋 `07d487e`)
+
+**문제**: `coverage_planner_node`가 마커를 `world` 프레임 X=2.5에 찍는데, RViz가 보는
+`/tf` 트리에서는 `base_link = world = 원점(X=0)` - 마커가 2.5m 안쪽에 찍혀 플랫폼/팔과
+X 좌표가 어긋나 보이던 문제.
+
+**원인**: `x_fixed_m=2.5`는 Gazebo HIL 전용(플랫폼이 world X=2.5에 스폰되는 환경) 값이었는데,
+실물 팔 RViz(`/tf` 기준)에서도 동일하게 쓰고 있었음.
+
+**IK 계산 자체는 무관** - `world_to_base_link()`에서 `x_fixed_m`이 분자/분모에서 동시에 상쇄되어
+어떤 값이든 결과가 동일함. 순수 시각화 오프셋 문제.
+
+**수정**: `coverage_planner_node.py`/`coverage_planner.launch.py`의 `x_fixed_m` 기본값을
+0.0으로 변경, 주석에 두 케이스 명시:
+- 실물 팔 / RViz(`/tf`): 0.0
+- Gazebo HIL(`/sim/tf`, `spawn_x=2.5`): 2.5 (명시적으로 `x_fixed_m:=2.5` 넘길 것)
+
+### 3. coverage_planner_node 계산 시간 문제 (미해결 - 다음 세션 후보)
+
+RViz에서 실측 확인: `coverage_planner_node`가 43개 웨이포인트마다 PyBullet IK 격자 탐색
+(플랫폼 Y×Z × 시드 9~13개)을 수행해서 전체 완료에 수십 분 걸림. 첫 웨이포인트만
+60~90초 소요.
+
+**핵심 지적(사용자)**: 아치 기하학(각도, 법선)을 이미 알고 있는데 exhaustive IK 탐색이
+과하다는 지적 - 각도 기반 방식에서는 플랫폼 Y ≈ R·cos(θ), Z ≈ max(0.5, R·sin(θ)+3-arm_reach)
+공식 한 줄로 추정 가능.
+
+**다음 세션에서 결정할 것**: 빠른 공식 추정으로 교체할지(수 초 완료), 아니면 IK 검증 결과가
+필요해서 현재 방식을 유지할지 판단.
+
+### 4. 세션 종료 상태
+
+- **git(test 브랜치)**: `bf6d69b`/`07d487e` 두 커밋 푸시 완료. main 브랜치에는 지장 없음.
+- **실물 하드웨어**: 이 세션에서 `piper_controller_node`/`push_forward_node` 실행 안 함.
+- **coverage_planner_node**: 43개 중 1번째 계산 중인 채로 세션 전환.
+
+### 5. 다음 세션 후보
+
+1. **coverage_planner_node 속도 개선** - 공식 기반 플랫폼 위치 추정으로 IK 탐색 교체(수 초 완료).
+2. 기존 9/28 세션 후보(1~6번) 그대로 유효.
