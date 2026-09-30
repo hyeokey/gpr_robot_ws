@@ -59,8 +59,8 @@ from piper_controller.ik_solver import (  # noqa: E402
 from piper_motion import connect, enter_standby, read_deg  # noqa: E402
 from sim_view import IK_LOWER, IK_UPPER, JOINT_NAMES, load_ik_model, orientation_angle_diff_deg  # noqa: E402
 
-KP = 10.0  # control_real_mit.py에서 검증된 MIT 비례 강성
-KD = 0.8   # MIT 미분 감쇠
+KP = 12.0  # MIT 비례 강성. 2026-09-30: control_real_mit.py에서 검증된 10.0 -> 12.0 인상(사용자 판단, 실물 미검증)
+KD = 0.8   # MIT 미분 감쇠. KP 12.0 인상 때 그대로 둠 - 감쇠비(∝KD/√KP)가 약 9% 낮아짐, 떨림 보이면 KD≈0.88이 KP 10.0 때와 같은 감쇠비
 RAMP_DURATION_S = 3.0  # 진입 anchor용 최소 램프 시간(초) - 실제로는 아래 MAX_JOINT_SPEED_DEG_S 기준으로 더 늘어날 수 있음
 CONTROL_HZ = 100.0
 TEACHING_MODE = 0x02  # ArmMsgFeedbackStatusEnum.CtrlMode.TEACHING_MODE
