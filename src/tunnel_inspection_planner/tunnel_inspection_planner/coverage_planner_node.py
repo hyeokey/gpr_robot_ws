@@ -12,6 +12,10 @@ target_index >= 0 이면 해당 타깃을 제어 토픽으로 발행한다:
    팔이 즉시(속도 상한 램프로 천천히) 이동하기 시작한다.
    실행 전 반드시 팔 주변 장애물/사람이 없는지 확인할 것.
 
+RViz 마커(/tunnel_inspection/markers): 아치 원호, 타깃 구체/번호, 선택한 타깃의 법선 화살표와
+각도 기준점(아치 원 중심)에서 그 표면점까지의 분홍 선. 이와 별개로 link6 현재 위치와 각도 기준점을
+잇는 초록 선(네임스페이스 link6_to_arch_center)을 타깃 선택과 무관하게 0.1초마다 최신 TF로 그린다.
+
 사용 예:
   # 마커만 표시 (팔 안 움직임)
   ros2 launch tunnel_inspection_planner coverage_planner.launch.py
@@ -36,7 +40,16 @@ from tunnel_inspection_planner.arch_waypoints import (
 )
 
 NS = "tunnel_inspection"
+LINK6_LINE_NS = "link6_to_arch_center"
+# link6-각도 기준점 선 갱신 주기 - 팔이 움직이는 동안에도 최신 TF를 따라가도록 2초 마커 재발행과
+# 별개인 독립 타이머로 돌린다(contact_planner_node.TIP_MARKER_PERIOD_S와 같은 이유).
+LINK6_LINE_PERIOD_S = 0.1
 TRANSIENT = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
+
+def _arch_center_point(x_fixed_m: float) -> Point:
+    """θ를 재는 기준점 = 아치 원 중심(world)."""
+    return Point(x=float(x_fixed_m), y=float(geom.ARCH_CENTER_Y_M), z=float(geom.ARCH_CENTER_Z_M))
 
 
 def _quat_from_z_axis(normal):
@@ -79,6 +92,9 @@ class CoveragePlannerNode(Node):
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         self.marker_pub = self.create_publisher(MarkerArray, f"/{NS}/markers", TRANSIENT)
+        # link6 선은 같은 토픽에 writer를 따로 둔다 - depth=1이라 한 writer로 10Hz 선을 보내면, 늦게 붙은
+        # Transient Local 구독자(coverage_planner.rviz)용 히스토리에서 2초마다 보내는 전체 마커가 밀려난다.
+        self.link6_line_pub = self.create_publisher(MarkerArray, f"/{NS}/markers", TRANSIENT)
         self.target_pose_pub = self.create_publisher(PoseStamped, "/piper/target_pose", TRANSIENT)
         self.wall_plane_pub = self.create_publisher(PoseStamped, "/piper/locked_wall_plane", TRANSIENT)
 
@@ -88,6 +104,7 @@ class CoveragePlannerNode(Node):
         # - 마커: TRANSIENT_LOCAL 보조 (늦게 뜬 RViz도 수신)
         # - 제어 토픽: TF가 spin 후에야 쌓이므로 타이머에서 첫 발행 (약 2초 지연)
         self.create_timer(2.0, self._republish_markers)
+        self.create_timer(LINK6_LINE_PERIOD_S, self._publish_link6_line)
 
     def _run(self):
         x_fixed_m = float(self.get_parameter("x_fixed_m").value)
@@ -318,8 +335,59 @@ class CoveragePlannerNode(Node):
                 detail.lifetime.sec = 0
                 arr.markers.append(detail)
 
+                # 각도 기준점(아치 원 중심)에서 표면점까지 - θ를 재는 반지름
+                radius = Marker()
+                radius.header.frame_id = base_frame
+                radius.header.stamp = stamp
+                radius.ns = NS
+                radius.id = 902
+                radius.type = Marker.LINE_LIST
+                radius.action = Marker.ADD
+                radius.pose.orientation.w = 1.0
+                radius.points.append(_arch_center_point(x_fixed_m))
+                radius.points.append(Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])))
+                radius.scale.x = 0.015
+                radius.color.r, radius.color.g, radius.color.b, radius.color.a = 1.0, 0.4, 0.7, 1.0
+                radius.lifetime.sec = 0
+                arr.markers.append(radius)
+
         self.marker_pub.publish(arr)
         self.get_logger().info(f"RViz 마커 발행 완료 ({len(waypoints)}개 타깃).")
+
+    def _publish_link6_line(self):
+        """link6 현재 위치와 각도 기준점(아치 원 중심)을 잇는 초록 선 - 타깃 선택과 무관하게 항상,
+        LINK6_LINE_PERIOD_S마다 최신 TF로 다시 그린다. HIL(hil:=true)에서는 /sim/tf 기준이라
+        Gazebo 플랫폼 위치까지 반영된다."""
+        base_frame = str(self.get_parameter("base_frame").value)
+        try:
+            t = self._tf_buffer.lookup_transform(base_frame, "link6", RclpyTime())
+        except Exception as e:
+            # skip_first: 노드가 막 떠서 TF가 아직 안 들어온 동안의 실패는 찍지 않는다(5초 넘게 계속되면 찍힘).
+            self.get_logger().warn(
+                f"link6 선 생략 - TF lookup 실패 ({base_frame}→link6): {e}",
+                throttle_duration_sec=5.0, skip_first=True,
+            )
+            return
+        tr = t.transform.translation
+        x_fixed_m = float(self.get_parameter("x_fixed_m").value)
+
+        line = Marker()
+        line.header.frame_id = base_frame
+        line.header.stamp = self.get_clock().now().to_msg()
+        line.ns = LINK6_LINE_NS
+        line.id = 0
+        line.type = Marker.LINE_LIST
+        line.action = Marker.ADD
+        line.pose.orientation.w = 1.0
+        line.points.append(_arch_center_point(x_fixed_m))
+        line.points.append(Point(x=tr.x, y=tr.y, z=tr.z))
+        line.scale.x = 0.015
+        line.color.r, line.color.g, line.color.b, line.color.a = 0.2, 1.0, 0.2, 1.0
+        # 다른 마커와 달리 수명을 둔다 - 노드가 꺼지거나 TF가 끊기면 옛 link6 위치에 선이 남지 않게.
+        line.lifetime.sec = 1
+        arr = MarkerArray()
+        arr.markers.append(line)
+        self.link6_line_pub.publish(arr)
 
 
 def main(args=None):
