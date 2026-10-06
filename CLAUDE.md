@@ -1107,3 +1107,94 @@ RViz에서 실측 확인: `coverage_planner_node`가 43개 웨이포인트마다
 
 1. **coverage_planner_node 속도 개선** - 공식 기반 플랫폼 위치 추정으로 IK 탐색 교체(수 초 완료).
 2. 기존 9/28 세션 후보(1~6번) 그대로 유효.
+
+---
+
+## 2026-10-06 작업 기록
+
+### 0. 9/30 세션 미기록분 정리 + 커밋 (`6c5cbc7`, test)
+
+CLAUDE.md에 기록 없이 커밋된 것: `78e8887`(coverage_planner_node에서 IK 격자 탐색을 빼고 43개 타깃을 순수
+기하로 즉시 계산 + `target_index` 제어 - 9/29 "다음 세션 후보 1번" 해결), `2d1433c`(MIT KP 10.0 -> 12.0, 실물
+미검증). 미커밋으로 남아 있던 것을 이번 세션 시작 시 `6c5cbc7`로 커밋+푸시함:
+- `coverage_planner_node`: world->base_link를 TF에서 읽어 목표를 base_link 기준으로 발행. `hil:=true`면
+  `/tf`->`/sim/tf` remap(Gazebo 플랫폼 위치 반영).
+- 신규 `arch_target_solver.py`: 타깃 번호별 "플랫폼 Y/Z + 관절해" 오프라인 계산기(ROS 노드 아님, 로봇 안 움직임).
+  ```bash
+  source /opt/ros/jazzy/setup.bash && source ~/gpr_robot_ws/install/setup.bash
+  ~/gpr_robot/.venv/bin/python3 -m tunnel_inspection_planner.arch_target_solver --indices 10 21   # --detail / --map / --output
+  ```
+- `tunnel_piper_hil.launch.py`(RViz도 `/sim/tf`, 플랫폼 기본 0.5x0.5), `piper_hil.rviz`.
+
+### 1. `arch_target_solver.py`: 타깃마다 후보 3세트
+
+- 기존 순위(±5cm 창 만족 -> 창 안 최소 관절여유)를 따라가며, 앞서 고른 세트와 플랫폼 위치가 `min_separation_m`
+  (10cm) 이상 떨어진 점만 골라 `num_sets`(3)개까지 낸다. 거리 조건 없이 상위 3개를 뽑으면 5cm 격자 바로 옆 점
+  (사실상 같은 해)만 나와서 넣음. 옵션 `--sets`(1~9), `--min-separation`.
+- 1번 세트는 예전 단일 결과와 필드 단위로 동일함을 확인(타깃 10, 21). 표에 set 열, `--map`에 세트 번호,
+  JSON은 `results[].sets[]`로 구조 변경.
+
+### 2. RViz 마커 2개 (`coverage_planner_node.py`) + 각도 정의
+
+- **각도 기준점 = 아치 원 중심** world (Y, Z) = (0, 3.0). θ는 +Y 수평을 0°로 천장(90°) 지나 -Y(180°)까지.
+  타깃 i의 θ = i x 180/42. RViz 상세 텍스트의 θ/° 기호는 폰트에 없어서 `[10]  =42.9`처럼 빠져 보임.
+- 분홍 선: 기준점 -> 선택한 타깃 표면점(ns `tunnel_inspection`, id 902). link6 standoff 목표도 이 반지름 위에 있음.
+- 초록 선: link6 현재 위치(TF) <-> 기준점. 타깃 선택과 무관하게 0.1초 독립 타이머로 갱신(ns `link6_to_arch_center`,
+  lifetime 1초). 같은 토픽에 writer를 따로 둠(depth=1 Transient Local 히스토리에서 2초마다 보내는 전체 마커가
+  밀려나지 않게). ⚠️ 플래너 노드 안에 있어서 플래너를 끄면(PUSH 단계 등) 같이 사라짐.
+- 검증은 격리 도메인(`ROS_DOMAIN_ID=87`)에서 가짜 link6 TF로 함 - 실물/기본 도메인을 안 건드리고 노드를 시험하는
+  방법으로 이후에도 사용.
+
+### 3. 컨트롤러 IK 다듬기 (`ik_solver._refine_solution`) - 두 선이 안 겹치던 원인
+
+- 증상: 타깃 10/플랫폼(2.70, 5.20)에서 두 선이 16mm 벌어짐(대부분 X, 단면 수직). 실측: 실물 관절각이 "새로 뜬
+  컨트롤러의 IK 해"와 0.2° 이내로 같았고, 그 해 자체가 목표를 17mm 빗나감 - 컨트롤러가 위치오차 20mm
+  (`IK_POS_TOL_M`)까지 받아들여 그대로 실행한 것(MIT 추종 문제 아님). 계산기 표의 관절각은 원래부터 다듬은 해라
+  컨트롤러가 실제로 쓰던 해와 달랐음.
+- 근본 원인(오프라인 pybullet 실험): `solve_ik()`가 시드를 restPoses(널스페이스 선호 자세)로도 넘겨서, 시드가
+  답에서 멀면 그쪽으로 끌려 중간에서 멈춘다 - 출발=선호=0이면 반복 10만 회에도 11.0mm, 선호 자세만 답 근처로
+  주면 1000회에 0.0mm. **9/15 주석의 "12mm대는 진짜 기구학적 한계"라는 해석은 틀렸음**(같은 목표가 0.0mm로
+  풀림) - `ik_solver.py`에 정정 주석 추가.
+- 수정: `solve_ik_best()`가 고른 해에서 다시 출발(시드=restPoses)해 최대 20회 다듬는다. 매 회 위치오차 감소 +
+  방향 허용치 + 관절여유가 min(원래 여유, 10°)에서 `IK_REFINE_MARGIN_GIVE_DEG`(2°) 넘게 안 떨어질 때만 수락.
+  받아들임/거부 판정은 그대로. 2° 한도 이유: 제한 없으면 손목이 비틀린 타협해(j4/j6 반대 방향)가 최대 45° 풀리며
+  여유가 13.9->5.4도처럼 떨어지는 경우가 있었음. "새 목표" 로그에 `IK해 위치오차` 추가.
+- 검증: 오프라인(아치 타깃 22개 x 플랫폼 격자, 해 555건) 판정 변화 0/위반 0, 위치오차 중앙 11.6->0.37mm
+  (작업공간 끝 일부는 덜 줄지만 악화 없음), IK 계산 최악 +24ms. 모의 하드웨어(실제 노드 + 가짜 팔, 격리 도메인)
+  최종 0.29mm. 실물: 두 선 간격 16.4->2.9mm(정착 후 ~0.7mm), 관절각이 계산기 표와 0.24° 이내.
+
+### 4. ⚠️ 함정: `piper_controller`는 symlink가 아니라 복사 설치
+
+`python3 src/piper_controller/piper_controller/piper_controller_node.py`로 실행해도 노드 스크립트만 src고
+`from piper_controller.ik_solver import ...`는 **install 복사본**을 읽는다(9/28 일반 `colcon build`). `ik_solver.py`나
+`wrist_leveling.py`를 고치면 반드시 `colcon build --packages-select piper_controller` 후 컨트롤러 재시작. 이번
+세션에 재빌드함. (`tunnel_inspection_planner`는 symlink 설치라 바로 반영됨)
+
+### 5. PUSH 후 link6 각도 오차 측정 39회 (리더 요청) - 결과: `docs/arch_push_angle_results_2026-10-06.md`
+
+- 15° 간격 13개 타깃(0, 3, 7, 10, 14, 17, 21, 25, 28, 32, 35, 39, 42 - 15° 홀수배는 두 타깃 정중앙이라 90° 기준
+  좌우 대칭으로 고름) x 계산기 3세트. 세트마다 플랫폼 이동 -> 컨트롤러 이동 -> `push_forward_node` PUSH -> 정지 후 측정.
+- 측정: 기준점 기준 link6 θ. 실물 = `/joint_states` FK + 플랫폼 TF, RViz = `/sim/tf` link6. 3초 평균, 실물 θ가
+  그동안 0.001° 넘게 움직이면 재측정.
+- 결과(실물): 오차 크기 평균 **0.061°**, 최대 0.182°, 0.1° 이내 35/39. 90° 미만은 전부 -, 90° 초과는 17/18이 + ->
+  link6가 일관되게 바닥 쪽으로 약간 처짐(중력 방향). **42번(180°)만 0.15~0.18°**로 대칭인 0번(0.03~0.07°)의
+  2~4배 - 원인 미확인.
+- PUSH 후 RViz(Gazebo) link6는 실물과 다르다: Gazebo 팔이 가상 벽에 막혀 j2/j3/j5가 덜 펴짐(예: 실물 j3 -114° vs
+  Gazebo -96°). 그래서 PUSH 후 RViz의 초록 선은 실물을 안 가리킴 - 결과는 실물 값 기준.
+- 관찰: 계산기 표의 17·25번 3세트는 손목 특이점(j5≈0) 해였는데, 컨트롤러를 켜둔 채 2세트에서 넘어가면 특이점
+  대신 j3≈-162°(한계 -170°까지 약 8°)인 접힌 자세로 감. 플랫폼 입력 실수(Z 4.45/4.55, Y -0.10/+0.10)가 두 번
+  있었고 측정값의 base_link TF로 잡아냄 - 측정할 때 플랫폼 위치를 같이 확인할 것.
+- 측정 스크립트는 세션 임시 폴더에만 있었음(저장소에 없음).
+
+### 6. 세션 종료 상태
+
+- git(test): 위 변경분(계산기 3세트, RViz 선 2개, IK 다듬기, 이 기록 + 결과 문서)을 커밋+푸시. main 안 건드림.
+- 실물: `piper_controller_node`/`coverage_planner_node`/`push_forward_node` 모두 사용자가 종료. Gazebo만 실행 중.
+
+### 7. 다음 세션 후보
+
+1. **42번(180°) 오차가 0번의 2~4배인 원인** - 좌우 비대칭(관절 영점, 중력 부하, PUSH 깊이) 확인.
+2. 측정 스크립트를 저장소 도구로 추가할지 판단.
+3. 초록 선을 PUSH 중에도 보려면 별도 노드로 분리.
+4. IK 다듬기 후에도 5mm 넘게 남는 경우(작업공간 끝, 오프라인 555건 중 98건) - 다듬기 횟수 상한/관절여유 한도 재검토 여지.
+5. 기존 9/22~9/29 후보 그대로 유효.
