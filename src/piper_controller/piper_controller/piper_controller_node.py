@@ -544,12 +544,14 @@ class PiperControllerNode(Node):
         )
         self._arrival_logged = False  # 새 목표니까 도착 로그 다시 찍을 수 있게 리셋
         self._arrival_hold_count = 0
+        ik_fk_pos, _ = tip_pose(self.ik_robot, self.joint_indices, target_deg)
         self.get_logger().info(
             f"새 목표 - 위치차 {pos_delta_m * 100:.1f}cm, 방향차 {orn_delta_deg:.1f}도, "
             f"램프 {self.ramp_duration_s:.1f}초, 최대관절차 J{max_joint_idx + 1}="
             f"{joint_deltas_deg[max_joint_idx]:+.1f}도 "
             f"(전체 {['%+.0f' % d for d in joint_deltas_deg]}) "
-            f"관절한계여유={_joint_limit_margin_deg(sol):.1f}도",
+            f"관절한계여유={_joint_limit_margin_deg(sol):.1f}도, "
+            f"IK해 위치오차={math.dist(ik_fk_pos, pos) * 1000:.1f}mm",
             throttle_duration_sec=0.5,
         )
 

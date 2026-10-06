@@ -29,8 +29,21 @@ IK_POS_TOL_M = 0.02     # 이 이상 벗어나면 그 시드에서 IK가 실제�
 # 아니라 그 위치+방향 조합 자체가 정확히는 도달 불가능한 진짜 기구학적 한계) "5mm 초과"라는
 # 이유만으로 전부 거부되고 있었다. MIT 저수준 PD 자체의 실측 잔차(2~4cm)보다도 이 IK 여유가
 # 더 타이트했으니 애초에 안 맞는 기준이었음 - 20mm로 완화.
+# 2026-10-06 정정: 위 "기구학적 한계" 해석은 틀렸다. solve_ik()는 시드를 restPoses(널스페이스 선호
+# 자세)로도 넘기는데, 시드가 답에서 멀면 그 선호 자세가 풀이를 계속 끌어당겨 중간에서 멈춘다 - 반복을
+# 늘려도 그 자리에서 안 움직인다(타깃 10/플랫폼 Y2.70 Z5.20 오프라인 실측: 출발=선호=전부 0이면 10만 회에도
+# 11.0mm, 선호 자세만 답 근처로 주면 1000회에 0.0mm). 같은 목표가 0.0mm로 풀리니 도달 불가가 아니다.
+# 그래서 solve_ik_best()가 고른 해를 그 해에서 다시 출발시켜 다듬는다(_refine_solution). 20mm는 "이
+# 시드에서 풀 만한 목표인가"를 거르는 후보 기준으로만 남는다.
+IK_REFINE_MAX_ROUNDS = 20   # _refine_solution: 고른 해에서 다시 출발해 solve_ik()를 반복하는 최대 횟수
+IK_REFINE_STOP_M = 0.0005   # 위치오차가 이 밑으로 내려가면 다듬기를 멈춘다
 IK_ORN_TOL_DEG = 2.0
 IK_MARGIN_DANGER_DEG = 10.0  # 현재(연속성 유지) 해의 최소 관절여유가 이 밑으로 내려가면 대안 탐색
+# 다듬기가 관절여유를 내줄 수 있는 한도 - min(고른 해의 여유, IK_MARGIN_DANGER_DEG)보다 이만큼 넘게 떨어지면
+# 거기서 멈춘다. 2026-10-06 오프라인 비교(아치 타깃 22개 x 플랫폼 격자, 해 555건): 0도로 두면 여유 1도 남짓을
+# 내주고 20mm를 0.3mm로 줄이는 경우까지 막혀 5mm 초과가 88->146건, 2도면 98건이면서 기준보다 2도 넘게
+# 떨어지는 경우(제한 없을 땐 14건, 예: 여유 13.9->5.4도)가 0건.
+IK_REFINE_MARGIN_GIVE_DEG = 2.0
 IK_MARGIN_SWITCH_BENEFIT_DEG = 5.0  # 대안이 이만큼 더 나아야 분기 전환(사소한 차이로 계속
 # 전환/흔들리는 것 방지)
 
@@ -129,6 +142,33 @@ def _joint_limit_margin_deg(sol_rad):
     return math.degrees(min(margins))
 
 
+def _refine_solution(ik_robot, joint_indices, sol, target_pos, target_orn):
+    """solve_ik_best()가 고른 해(sol)에서 다시 출발해(시드 겸 restPoses) solve_ik()를 반복, 목표에 더
+    붙인다(한 번에 못 붙는 이유는 IK_REFINE_MAX_ROUNDS 위 2026-10-06 정정 주석 참고). 매 회 위치오차가
+    줄고, 방향 허용치를 지키고, 관절여유가 IK_REFINE_MARGIN_GIVE_DEG 한도 안일 때만 받아들이고, 아니면 직전
+    해에서 멈춘다 - 그래서 돌려주는 해는 sol과 같은 후보 조건(solve_ik_best)을 만족하고 위치오차는 같거나
+    작다. 먼 시드에서 나온 해는 손목이 비틀린 타협점인 경우가 많아, 다듬으면 j4/j6가 반대 방향으로 수십 도씩
+    같이 풀리기도 한다(끝점 자세는 그대로, 2026-10-06 오프라인 비교에서 최대 45도)."""
+    best = list(sol)
+    margin_floor = max(
+        min(_joint_limit_margin_deg(sol), IK_MARGIN_DANGER_DEG) - IK_REFINE_MARGIN_GIVE_DEG,
+        -IK_HARD_LIMIT_SLACK_DEG)
+    fk_pos, _ = tip_pose(ik_robot, joint_indices, [math.degrees(a) for a in best[:6]])
+    best_err = math.dist(fk_pos, target_pos)
+    for _ in range(IK_REFINE_MAX_ROUNDS):
+        if best_err < IK_REFINE_STOP_M:
+            break
+        cand = solve_ik(ik_robot, joint_indices, best, target_pos, target_orn)
+        fk_pos, fk_orn = tip_pose(ik_robot, joint_indices, [math.degrees(a) for a in cand[:6]])
+        err = math.dist(fk_pos, target_pos)
+        if (err >= best_err - 1e-7
+                or orientation_angle_diff_deg(fk_orn, target_orn) >= IK_ORN_TOL_DEG
+                or _joint_limit_margin_deg(cand) < margin_floor):
+            break
+        best, best_err = cand, err
+    return best
+
+
 def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target_orn, logger=None):
     """solve_ik()를 여러 시드로 시도해서, 실제로 목표에 수렴하는 해들(IK_POS_TOL_M/IK_ORN_TOL_DEG
     이내) 중 관절 한계 여유가 가장 큰 걸 고른다. 매번 무조건 최선을 고르진 않고, 기존
@@ -145,7 +185,10 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
     lowerLimits/upperLimits/jointRanges/restPoses는 하드 제약이 아니라 "이 안이면 좋겠다"는
     널스페이스 힌트일 뿐이라, 실제로 그 범위를 벗어난 해를 리턴할 수 있다. margin<0(=한계
     벗어남)이면 FK가 아무리 잘 맞아도 그 후보를 완전히 버린다 - "관절 한계 안에서 수렴하는
-    해가 하나도 없음"도 "IK 완전 실패"와 동일하게 취급(None 리턴, 목표 거부)한다."""
+    해가 하나도 없음"도 "IK 완전 실패"와 동일하게 취급(None 리턴, 목표 거부)한다.
+
+    2026-10-06: 고른 해는 돌려주기 전에 _refine_solution()으로 다듬는다 - 후보 판정(어느 시드가 수렴하나,
+    관절여유 비교)은 다듬기 전 해 기준 그대로라 어떤 목표를 받아들이고 거부하는지는 바뀌지 않는다."""
     primary_sol = solve_ik(ik_robot, joint_indices, primary_rest_pose, target_pos, target_orn)
     primary_fk_pos, primary_fk_orn = tip_pose(
         ik_robot, joint_indices, [math.degrees(a) for a in primary_sol[:6]])
@@ -156,7 +199,8 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
     primary_margin = primary_margin_raw if primary_ok else -1e9
 
     if primary_ok and primary_margin >= IK_MARGIN_DANGER_DEG:
-        return primary_sol  # 이미 충분히 안전 - 대안 탐색 안 함(연속성 유지)
+        # 이미 충분히 안전 - 대안 탐색 안 함(연속성 유지)
+        return _refine_solution(ik_robot, joint_indices, primary_sol, target_pos, target_orn)
 
     alt_labels = ["elbow_flip", "wrist_flip", "neutral"] + [
         f"canonical_reach_j1={j1_deg:+.0f}" for j1_deg in CANONICAL_REACH_JOINT1_DEG]
@@ -192,7 +236,7 @@ def solve_ik_best(ik_robot, joint_indices, primary_rest_pose, target_pos, target
             f"IK 분기 전환: primary 시드 관절여유 {primary_margin:.1f}도 -> '{best_label}' "
             f"시드로 전환({best_margin:.1f}도)."
         )
-    return best_sol
+    return _refine_solution(ik_robot, joint_indices, best_sol, target_pos, target_orn)
 
 
 def _roll_about_local_z(orn, theta_rad):
