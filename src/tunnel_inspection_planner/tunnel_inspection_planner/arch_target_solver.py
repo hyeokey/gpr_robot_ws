@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""아치 타깃 번호별 "플랫폼 Y/Z + 팔 관절해" 1세트 오프라인 계산기.
+"""아치 타깃 번호별 "플랫폼 Y/Z + 팔 관절해" 후보 세트(기본 3개) 오프라인 계산기.
 
 ROS 노드가 아니고 아무것도 움직이지 않는다 - pybullet IK 모델로 계산만 해서 결과를 출력한다.
 
 2026-09-30 배경: 지금까지는 coverage_planner_node를 target_index로 띄우고, Gazebo 플랫폼을 손으로
 옮기고, piper_controller_node를 켜서 "IK 완전 실패"가 나오면 플랫폼을 다시 옮기는 시행착오를
 반복했다. 이 모듈은 그 과정을 계산으로 대신해서, 타깃마다 "플랫폼을 여기 두면 컨트롤러가 이
-관절해로 간다"는 한 세트를 뽑는다. 43개 전부는 시간이 걸리므로 --indices로 필요한 것만 계산한다.
+관절해로 간다"는 세트를 뽑는다(2026-10-06부터 한 세트가 아니라 서로 떨어진 플랫폼 위치로 기본
+3세트). 43개 전부는 시간이 걸리므로 --indices로 필요한 것만 계산한다.
 
 일관성 전제 - 아래 셋 중 하나라도 바뀌면 이 모듈도 같이 맞출 것:
 - 목표 정의는 coverage_planner_node._publish_control()과 같다. link6 목표 위치 = 표면점 +
@@ -27,6 +28,9 @@ ROS 노드가 아니고 아무것도 움직이지 않는다 - pybullet IK 모델
     보고하고, 다듬은 뒤에도 plan_pos_tol_m, plan_orn_tol_deg를 못 맞추면 뺀다. 작업공간 경계이거나,
     컨트롤러 해가 손목이 크게 비틀린 다른 분기로 가서 다듬어도 천천히만 수렴하는 곳이다(2026-09-30
     확인: 이런 곳은 컨트롤러 해 자체도 목표를 15~19mm 빗나간다). 아래 2~3번 검사도 다듬은 해 기준이다.
+    2026-10-06부터는 solve_ik_best()가 같은 방식으로 다듬어서 돌려주므로(ik_solver._refine_solution)
+    컨트롤러 해와 관절해가 거의 같다. 컨트롤러 쪽은 관절여유를 2도까지만 내주며 다듬기 때문에, 그 한도에
+    걸린 곳에서만 "컨트롤러 예측"의 위치오차/관절 차이가 남는다.
  2. 관절여유가 min_margin_deg 이상이다.
  3. 팔 링크(base_link~link6)와 터널 충돌체(tunnel_collision_bodies) 사이가 min_clearance_m 이상이다.
     gripper_base와 손가락 링크는 뺀다. 실물엔 그리퍼가 없고 그 자리에 검사판이 달려 있는데, IK
@@ -37,18 +41,22 @@ ROS 노드가 아니고 아무것도 움직이지 않는다 - pybullet IK 모델
  4. 플랫폼 박스(윗면 = Z, 두께만큼 아래) 네 모서리가 터널 단면 안쪽으로 min_platform_clearance_m
     이상 들어와 있다.
 
-선택: 사용 가능한 점 중에서 주변 ±window_m 이웃까지 전부 사용 가능한 점만 남기고, 그 창 안의
-최소 관절여유가 가장 큰 점을 고른다. Gazebo 플랫폼은 명령값에서 몇 cm 벗어나 멈출 수 있고
+선택: 사용 가능한 점에 순위를 매긴다. 주변 ±window_m 이웃까지 전부 사용 가능한 점이 앞에 서고, 그
+안에서는 창 안의 최소 관절여유가 큰 순서다. Gazebo 플랫폼은 명령값에서 몇 cm 벗어나 멈출 수 있고
 (platform_control_node 도달 판정 3cm), coverage_planner_node는 실제 TF 위치로 목표를 다시 계산하므로
 명령한 한 점만이 아니라 그 주변에도 해가 있어야 "IK 실패 -> 플랫폼 재이동" 반복이 안 생긴다.
-그런 점이 없으면 창 없이 최선의 점을 고르고 결과에 그렇다고 표시한다. roll 재시도 없이는 사용
-가능한 점이 하나도 없을 때만, 컨트롤러와 같은 roll 재시도(_recover_via_roll_sweep)를 켜고 다시 훑는다.
+창을 못 만족하는 점은 그 뒤에 관절여유 순으로 서고, 그런 점을 고르면 결과에 그렇다고 표시한다.
+이 순위를 따라가며 앞서 고른 세트들과 플랫폼 위치(Y, Z)가 min_separation_m 이상 떨어진 점만 골라
+num_sets개까지 낸다. 거리 조건이 없으면 5cm 격자에서 바로 옆 점, 즉 사실상 같은 해가 줄줄이 뽑힌다.
+1번 세트는 한 세트만 내던 때의 결과와 같다. roll 재시도 없이는 사용 가능한 점이 하나도 없을 때만,
+컨트롤러와 같은 roll 재시도(_recover_via_roll_sweep)를 켜고 다시 훑는다.
 
 실행 (pybullet이 venv에만 있어서 ros2 run 대신 venv python으로 직접):
     source /opt/ros/jazzy/setup.bash && source ~/gpr_robot_ws/install/setup.bash
     ~/gpr_robot/.venv/bin/python3 -m tunnel_inspection_planner.arch_target_solver --indices 21 32
-기본 출력은 타깃마다 한 줄(플랫폼 Y/Z + 관절해)이고, 위 판정별 수치는 --detail, 격자 판정 지도는
---map, 전체 결과 JSON은 --output 경로로 본다.
+기본 출력은 타깃마다 세트별 한 줄(플랫폼 Y/Z + 관절해)이고, 세트 수는 --sets, 세트끼리 최소 거리는
+--min-separation으로 바꾼다. 위 판정별 수치는 --detail, 격자 판정 지도는 --map, 전체 결과 JSON은
+--output 경로로 본다.
 """
 import argparse
 import contextlib
@@ -148,6 +156,8 @@ class SolverConfig:
     platform_limit_margin_m: float = 0.01  # platform_control_node.JOINT_LIMIT_SAFETY_MARGIN_M
     platform_size_y: float = 0.5      # tunnel_piper_hil.launch.py platform_size_y 기본값(2026-09-30 작업 트리)
     platform_thickness: float = 0.15
+    num_sets: int = 3                 # 타깃마다 내는 후보 세트 수
+    min_separation_m: float = 0.10    # 세트끼리 플랫폼 위치(Y, Z)가 이만큼은 떨어져야 한다
 
 
 @dataclass
@@ -169,34 +179,41 @@ class GridEval:
 
 
 @dataclass
+class CandidateSet:
+    """타깃 하나에 대한 후보 세트 하나 - 플랫폼 위치, 그 자리에서의 관절해, 판정 수치."""
+    rank: int                         # 1부터, 순위순
+    platform_y: float
+    platform_z: float
+    target_base_link_pos: list
+    joint_deg: list
+    pos_err_mm: float
+    orn_err_deg: float
+    joint_margin_deg: float
+    tightest_joint: str
+    arm_clearance_mm: float
+    arm_clearance_where: str
+    platform_clearance_mm: float
+    plate_clearance_mm: float             # 관절해 자세에서 판-터널 최소 거리
+    plate_clearance_where: str
+    controller_plate_clearance_mm: float  # 컨트롤러 해 자세에서 판-터널 최소 거리
+    controller_joint_deg: list
+    controller_pos_err_mm: float
+    controller_diff_deg: float
+    roll_deg: float = 0.0
+    window_m: float = 0.0             # 실제로 만족한 창(0이면 창 조건 없이 고른 점)
+    window_min_margin_deg: Optional[float] = None
+    repeat_max_diff_deg: Optional[float] = None
+
+
+@dataclass
 class TargetSolution:
     index: int
     theta_deg: float
     found: bool
     target_world_pos: list
     target_orn_xyzw: list
-    platform_y: Optional[float] = None
-    platform_z: Optional[float] = None
-    target_base_link_pos: Optional[list] = None
-    joint_deg: Optional[list] = None
-    pos_err_mm: Optional[float] = None
-    orn_err_deg: Optional[float] = None
-    joint_margin_deg: Optional[float] = None
-    tightest_joint: Optional[str] = None
-    arm_clearance_mm: Optional[float] = None
-    arm_clearance_where: Optional[str] = None
-    platform_clearance_mm: Optional[float] = None
-    plate_clearance_mm: Optional[float] = None             # 관절해 자세에서 판-터널 최소 거리
-    plate_clearance_where: Optional[str] = None
-    controller_plate_clearance_mm: Optional[float] = None  # 컨트롤러 해 자세에서 판-터널 최소 거리
-    controller_joint_deg: Optional[list] = None
-    controller_pos_err_mm: Optional[float] = None
-    controller_diff_deg: Optional[float] = None
-    roll_deg: float = 0.0
+    sets: list = field(default_factory=list)  # CandidateSet, 1번 세트부터 순위순
     used_roll_sweep_pass: bool = False
-    window_m: float = 0.0             # 실제로 만족한 창(0이면 창 조건 없이 고른 점)
-    window_min_margin_deg: Optional[float] = None
-    repeat_max_diff_deg: Optional[float] = None
     evaluated_points: int = 0
     usable_points: int = 0
     window_ok_points: int = 0
@@ -418,23 +435,66 @@ class ArchTargetSolver:
         return min(margins)
 
     def _select(self, evals: dict):
+        """후보 세트로 낼 격자점을 순위순으로 고른다 - ([(key, 만족한 창 칸 수, 창 안 최소 관절여유)], window_ok).
+        창을 만족하는 점이 (창 안 최소 관절여유, 관절여유, 팔-터널 거리) 순으로 먼저 서고, 창을 못
+        만족하는 점은 그 뒤에 (관절여유, 팔-터널 거리) 순으로 선다. 점수가 같으면 격자 순서가 앞인 점이
+        먼저다. 그 순서대로 보면서 이미 고른 점들과 min_separation_m 이상 떨어진 점만 담는다."""
+        cfg = self.cfg
         usable = {k: e for k, e in evals.items() if not e.reject}
-        if not usable:
-            return None, 0, None, set()
-        w = max(0, int(round(self.cfg.window_m / self.cfg.grid_step_m)))
-        window_ok, best_key, best_score = set(), None, None
+        w = max(0, int(round(cfg.window_m / cfg.grid_step_m)))
+        window_ok, ranked = set(), []
         for k in sorted(usable):
-            wmin = self._window_min_margin(k, usable, w) if w > 0 else usable[k].margin_deg
-            if wmin is None:
-                continue
-            window_ok.add(k)
-            score = (wmin, usable[k].margin_deg, usable[k].clearance_m)
-            if best_score is None or score > best_score:
-                best_key, best_score = k, score
-        if best_key is not None:
-            return best_key, w, best_score[0], window_ok
-        best_key = max(sorted(usable), key=lambda k: (usable[k].margin_deg, usable[k].clearance_m))
-        return best_key, 0, usable[best_key].margin_deg, window_ok
+            e = usable[k]
+            wmin = self._window_min_margin(k, usable, w) if w > 0 else e.margin_deg
+            if wmin is not None:
+                window_ok.add(k)
+                ranked.append(((1, wmin, e.margin_deg, e.clearance_m), k, w, wmin))
+            else:
+                ranked.append(((0, e.margin_deg, e.clearance_m), k, 0, e.margin_deg))
+        ranked.sort(key=lambda r: r[0], reverse=True)  # 안정 정렬이라 동점이면 격자 순서가 유지된다
+        chosen = []
+        for _score, k, kw, wmin in ranked:
+            if len(chosen) == cfg.num_sets:
+                break
+            if all(math.dist(k, c[0]) * cfg.grid_step_m >= cfg.min_separation_m - 1e-9 for c in chosen):
+                chosen.append((k, kw, wmin))
+        return chosen, window_ok
+
+    def _candidate_set(self, rank: int, pos, orn, ev: GridEval, window_m: float, wmin: float,
+                       allow_roll_sweep: bool) -> CandidateSet:
+        # 같은 점을 한 번 더 풀어서 결과가 똑같은지 확인 - "컨트롤러를 새로 띄우면 이 해로 간다"의 근거.
+        again = self.evaluate(pos, orn, ev.platform_y, ev.platform_z, allow_roll_sweep=allow_roll_sweep)
+        margins = _per_joint_margin_deg(ev.joint_deg)
+        base_world = np.array([self.cfg.x_fixed_m, ev.platform_y, ev.platform_z])
+        plate_d, plate_where = self.plate_clearance(base_world, ev.joint_deg)
+        ctrl_plate_d, _ = self.plate_clearance(base_world, ev.controller_joint_deg)
+        repeat = None
+        if again.controller_joint_deg is not None:
+            repeat = max(abs(a - b) for a, b in zip(again.controller_joint_deg, ev.controller_joint_deg))
+        return CandidateSet(
+            rank=rank,
+            platform_y=round(ev.platform_y, 4),
+            platform_z=round(ev.platform_z, 4),
+            target_base_link_pos=[float(v) for v in (pos - base_world)],
+            joint_deg=[float(d) for d in ev.joint_deg],
+            pos_err_mm=ev.pos_err_m * 1000.0,
+            orn_err_deg=ev.orn_err_deg,
+            joint_margin_deg=ev.margin_deg,
+            tightest_joint=JOINT_NAMES[int(np.argmin(margins))],
+            arm_clearance_mm=ev.clearance_m * 1000.0,
+            arm_clearance_where=ev.clearance_where,
+            platform_clearance_mm=ev.platform_clearance_m * 1000.0,
+            plate_clearance_mm=plate_d * 1000.0,
+            plate_clearance_where=plate_where,
+            controller_plate_clearance_mm=ctrl_plate_d * 1000.0,
+            controller_joint_deg=[float(d) for d in ev.controller_joint_deg],
+            controller_pos_err_mm=ev.controller_pos_err_m * 1000.0,
+            controller_diff_deg=ev.controller_diff_deg,
+            roll_deg=ev.roll_deg,
+            window_m=window_m,
+            window_min_margin_deg=wmin,
+            repeat_max_diff_deg=repeat,
+        )
 
     def solve(self, index: int):
         t0 = time.time()
@@ -450,52 +510,23 @@ class ArchTargetSolver:
             evals = {k: self.evaluate(pos, orn, k[0] * step, k[1] * step, allow_roll_sweep=True)
                      for k in keys}
 
-        chosen, w, wmin, window_ok = self._select(evals)
+        chosen, window_ok = self._select(evals)
         reject_counts = {}
         for e in evals.values():
             if e.reject:
                 reject_counts[e.reject] = reject_counts.get(e.reject, 0) + 1
 
         sol = TargetSolution(
-            index=index, theta_deg=float(wp.theta_deg), found=chosen is not None,
+            index=index, theta_deg=float(wp.theta_deg), found=bool(chosen),
             target_world_pos=[float(v) for v in pos], target_orn_xyzw=[float(v) for v in orn],
             used_roll_sweep_pass=used_roll_pass, evaluated_points=len(evals),
             usable_points=sum(1 for e in evals.values() if not e.reject),
             window_ok_points=len(window_ok), reject_counts=reject_counts,
         )
-        if chosen is not None:
-            ev = evals[chosen]
-            # 같은 점을 한 번 더 풀어서 결과가 똑같은지 확인 - "컨트롤러를 새로 띄우면 이 해로 간다"의 근거.
-            again = self.evaluate(pos, orn, ev.platform_y, ev.platform_z, allow_roll_sweep=used_roll_pass)
-            margins = _per_joint_margin_deg(ev.joint_deg)
-            base_world = np.array([self.cfg.x_fixed_m, ev.platform_y, ev.platform_z])
-            sol.platform_y = round(ev.platform_y, 4)
-            sol.platform_z = round(ev.platform_z, 4)
-            sol.target_base_link_pos = [float(v) for v in (pos - base_world)]
-            sol.joint_deg = [float(d) for d in ev.joint_deg]
-            sol.pos_err_mm = ev.pos_err_m * 1000.0
-            sol.orn_err_deg = ev.orn_err_deg
-            sol.joint_margin_deg = ev.margin_deg
-            sol.tightest_joint = JOINT_NAMES[int(np.argmin(margins))]
-            sol.arm_clearance_mm = ev.clearance_m * 1000.0
-            sol.arm_clearance_where = ev.clearance_where
-            sol.platform_clearance_mm = ev.platform_clearance_m * 1000.0
-            plate_d, plate_where = self.plate_clearance(base_world, ev.joint_deg)
-            ctrl_plate_d, _ = self.plate_clearance(base_world, ev.controller_joint_deg)
-            sol.plate_clearance_mm = plate_d * 1000.0
-            sol.plate_clearance_where = plate_where
-            sol.controller_plate_clearance_mm = ctrl_plate_d * 1000.0
-            sol.controller_joint_deg = [float(d) for d in ev.controller_joint_deg]
-            sol.controller_pos_err_mm = ev.controller_pos_err_m * 1000.0
-            sol.controller_diff_deg = ev.controller_diff_deg
-            sol.roll_deg = ev.roll_deg
-            sol.window_m = w * step
-            sol.window_min_margin_deg = wmin
-            if again.controller_joint_deg is not None:
-                sol.repeat_max_diff_deg = max(
-                    abs(a - b) for a, b in zip(again.controller_joint_deg, ev.controller_joint_deg))
+        for rank, (key, w, wmin) in enumerate(chosen, start=1):
+            sol.sets.append(self._candidate_set(rank, pos, orn, evals[key], w * step, wmin, used_roll_pass))
         sol.elapsed_s = time.time() - t0
-        return sol, evals, chosen, window_ok
+        return sol, evals, [key for key, _w, _wmin in chosen], window_ok
 
 
 # ---------------------------------------------------------------------- 출력 --------------------
@@ -517,62 +548,83 @@ def print_solution(sol: TargetSolution, cfg: SolverConfig) -> None:
     if not sol.found:
         print("  결과: 조건을 만족하는 플랫폼 위치가 없음")
         return
-    print(f"  플랫폼 위치           : Y = {sol.platform_y:+.2f} m, Z = {sol.platform_z:+.2f} m")
-    joints = "  ".join(f"{n} {d:+8.2f}" for n, d in zip(JOINT_NAMES, sol.joint_deg))
-    print(f"  관절해 (deg)          : {joints}")
-    print(f"  link6 목표 (base_link): {_fmt_vec(sol.target_base_link_pos)}  <- 컨트롤러가 받는 값")
-    print(f"  IK 오차               : 위치 {sol.pos_err_mm:.2f} mm, 방향 {sol.orn_err_deg:.3f}°")
-    print(f"  컨트롤러 예측         : 새로 띄운 컨트롤러도 이 위치에서 해를 찾음 - 그 해는 위치오차 "
-          f"{sol.controller_pos_err_mm:.1f} mm, 위 관절해와 최대 {sol.controller_diff_deg:.2f}° 차이")
-    print(f"  관절여유              : {sol.joint_margin_deg:.1f}° (가장 빠듯한 관절 {sol.tightest_joint})")
-    print(f"  팔-터널 최소 거리     : {sol.arm_clearance_mm:.0f} mm ({sol.arm_clearance_where})")
-    print(f"  플랫폼-터널 최소 거리 : {sol.platform_clearance_mm:.0f} mm")
-    plate_note = "  <- 음수: 판이 터널을 뚫음" if min(sol.plate_clearance_mm, sol.controller_plate_clearance_mm) < 0 else ""
-    print(f"  판-터널 최소 거리     : 관절해 {sol.plate_clearance_mm:.1f} mm, 컨트롤러 해 "
-          f"{sol.controller_plate_clearance_mm:.1f} mm ({sol.plate_clearance_where}, 반지름 4m 원 기준){plate_note}")
-    if sol.window_m > 0:
-        print(f"  위치 오차 내성        : 플랫폼이 Y/Z ±{sol.window_m * 100:.0f}cm 벗어나도 해 있음 "
-              f"(그 범위 최소 관절여유 {sol.window_min_margin_deg:.1f}°)")
-    else:
-        print("  위치 오차 내성        : 없음 - 주변 이웃까지 해가 있는 점이 없어 이 점 하나만 만족")
-    if sol.used_roll_sweep_pass:
-        print(f"  roll 재시도 사용      : 접근축 둘레 {sol.roll_deg:+.0f}° (roll 없이는 해가 없었음)")
-    if sol.repeat_max_diff_deg is not None:
-        print(f"  재계산 일치           : 같은 점에서 컨트롤러 해를 다시 풀었을 때 최대 차이 "
-              f"{sol.repeat_max_diff_deg:.2e}°")
-    print("  적용 (Gazebo 플랫폼만 움직임):")
-    print(f"    ros2 param set /platform_control_node target_y {sol.platform_y:.2f}")
-    print(f"    ros2 param set /platform_control_node target_z {sol.platform_z:.2f}")
+    if len(sol.sets) < cfg.num_sets:
+        print(f"  세트 수               : {cfg.num_sets}세트 중 {len(sol.sets)}세트만 나옴 - {_short_sets_reason(sol, cfg)}")
+    for s in sol.sets:
+        print_candidate_set(sol, s)
     print("  그 다음 플래너 (hil:=true여야 /sim/tf의 플랫폼 위치로 목표를 계산함, 컨트롤러가 떠 있으면 팔이 바로 움직임):")
     print(f"    ros2 launch tunnel_inspection_planner coverage_planner.launch.py target_index:={sol.index} hil:=true")
 
 
+def print_candidate_set(sol: TargetSolution, s: CandidateSet) -> None:
+    print(f"  --- 세트 {s.rank} ---")
+    print(f"  플랫폼 위치           : Y = {s.platform_y:+.2f} m, Z = {s.platform_z:+.2f} m")
+    joints = "  ".join(f"{n} {d:+8.2f}" for n, d in zip(JOINT_NAMES, s.joint_deg))
+    print(f"  관절해 (deg)          : {joints}")
+    print(f"  link6 목표 (base_link): {_fmt_vec(s.target_base_link_pos)}  <- 컨트롤러가 받는 값")
+    print(f"  IK 오차               : 위치 {s.pos_err_mm:.2f} mm, 방향 {s.orn_err_deg:.3f}°")
+    print(f"  컨트롤러 예측         : 새로 띄운 컨트롤러도 이 위치에서 해를 찾음 - 그 해는 위치오차 "
+          f"{s.controller_pos_err_mm:.1f} mm, 위 관절해와 최대 {s.controller_diff_deg:.2f}° 차이")
+    print(f"  관절여유              : {s.joint_margin_deg:.1f}° (가장 빠듯한 관절 {s.tightest_joint})")
+    print(f"  팔-터널 최소 거리     : {s.arm_clearance_mm:.0f} mm ({s.arm_clearance_where})")
+    print(f"  플랫폼-터널 최소 거리 : {s.platform_clearance_mm:.0f} mm")
+    plate_note = "  <- 음수: 판이 터널을 뚫음" if min(s.plate_clearance_mm, s.controller_plate_clearance_mm) < 0 else ""
+    print(f"  판-터널 최소 거리     : 관절해 {s.plate_clearance_mm:.1f} mm, 컨트롤러 해 "
+          f"{s.controller_plate_clearance_mm:.1f} mm ({s.plate_clearance_where}, 반지름 4m 원 기준){plate_note}")
+    if s.window_m > 0:
+        print(f"  위치 오차 내성        : 플랫폼이 Y/Z ±{s.window_m * 100:.0f}cm 벗어나도 해 있음 "
+              f"(그 범위 최소 관절여유 {s.window_min_margin_deg:.1f}°)")
+    else:
+        print("  위치 오차 내성        : 없음 - 주변 이웃까지 해가 있는 점이 아니라 이 점 하나만 만족")
+    if sol.used_roll_sweep_pass:
+        print(f"  roll 재시도 사용      : 접근축 둘레 {s.roll_deg:+.0f}° (roll 없이는 해가 없었음)")
+    if s.repeat_max_diff_deg is not None:
+        print(f"  재계산 일치           : 같은 점에서 컨트롤러 해를 다시 풀었을 때 최대 차이 "
+              f"{s.repeat_max_diff_deg:.2e}°")
+    print("  적용 (Gazebo 플랫폼만 움직임):")
+    print(f"    ros2 param set /platform_control_node target_y {s.platform_y:.2f}")
+    print(f"    ros2 param set /platform_control_node target_z {s.platform_z:.2f}")
+
+
 def print_table_header(cfg: SolverConfig) -> None:
-    print(f"타깃별 플랫폼 위치(m)와 관절해(도) - standoff {cfg.standoff_m * 100:.0f}cm 기준")
-    print(" idx  theta |      Y      Z |" + "".join(f"{f'j{i}':>8s}" for i in range(1, 7)))
+    print(f"타깃별 플랫폼 위치(m)와 관절해(도) - standoff {cfg.standoff_m * 100:.0f}cm 기준, 타깃마다 최대 "
+          f"{cfg.num_sets}세트(세트끼리 플랫폼 위치 {cfg.min_separation_m * 100:.0f}cm 이상 차이)")
+    print(" idx  theta set |      Y      Z |" + "".join(f"{f'j{i}':>8s}" for i in range(1, 7)))
 
 
 def print_table_row(sol: TargetSolution) -> None:
-    head = f"{sol.index:4d} {sol.theta_deg:6.1f} |"
+    head = f"{sol.index:4d} {sol.theta_deg:6.1f}"
     if not sol.found:
-        print(f"{head}  조건을 만족하는 위치 없음")
-    else:
-        joints = "".join(f"{d:+8.2f}" for d in sol.joint_deg)
-        print(f"{head} {sol.platform_y:+6.2f} {sol.platform_z:+6.2f} |{joints}")
+        print(f"{head}   - |  조건을 만족하는 위치 없음")
+    for s in sol.sets:
+        joints = "".join(f"{d:+8.2f}" for d in s.joint_deg)
+        print(f"{head} {s.rank:3d} | {s.platform_y:+6.2f} {s.platform_z:+6.2f} |{joints}")
+        head = " " * len(head)
     sys.stdout.flush()
 
 
+def _short_sets_reason(sol: TargetSolution, cfg: SolverConfig) -> str:
+    if sol.usable_points <= len(sol.sets):
+        return f"사용 가능한 점이 {sol.usable_points}개뿐"
+    return (f"서로 {cfg.min_separation_m * 100:.0f}cm 이상 떨어진 사용 가능한 점이 이것뿐"
+            " (--min-separation을 줄이면 더 나옴)")
+
+
 def solution_notes(sol: TargetSolution, cfg: SolverConfig) -> list:
-    """표 한 줄로는 안 보이는, 따로 알아야 할 점만 모은다(정상이면 빈 리스트)."""
+    """표로는 안 보이는, 따로 알아야 할 점만 모은다(정상이면 빈 리스트)."""
     if not sol.found:
         return ["조건을 만족하는 플랫폼 위치가 없음 - --detail --map으로 탈락 사유 확인"]
     notes = []
-    if cfg.window_m > 0 and sol.window_m == 0:
-        notes.append(f"플랫폼이 {cfg.window_m * 100:.0f}cm만 벗어나도 해가 없을 수 있음(여유 없는 한 점)")
-    if sol.used_roll_sweep_pass:
-        notes.append(f"roll 재시도로만 해가 나옴(접근축 둘레 {sol.roll_deg:+.0f}°)")
-    if min(sol.plate_clearance_mm, sol.controller_plate_clearance_mm) < 0:
-        notes.append("목표 자세에서 판이 터널을 뚫음 - standoff 확인")
+    if len(sol.sets) < cfg.num_sets:
+        notes.append(f"{cfg.num_sets}세트 중 {len(sol.sets)}세트만 나옴 - {_short_sets_reason(sol, cfg)}")
+    for s in sol.sets:
+        if cfg.window_m > 0 and s.window_m == 0:
+            notes.append(f"세트 {s.rank}: 플랫폼이 {cfg.window_m * 100:.0f}cm만 벗어나도 해가 없을 수 있음"
+                         "(여유 없는 한 점)")
+        if sol.used_roll_sweep_pass:
+            notes.append(f"세트 {s.rank}: roll 재시도로만 해가 나옴(접근축 둘레 {s.roll_deg:+.0f}°)")
+        if min(s.plate_clearance_mm, s.controller_plate_clearance_mm) < 0:
+            notes.append(f"세트 {s.rank}: 목표 자세에서 판이 터널을 뚫음 - standoff 확인")
     return notes
 
 
@@ -587,14 +639,15 @@ def rerun_command(argv: list, extra: str) -> str:
     return " ".join(parts)
 
 
-def print_map(evals: dict, chosen, window_ok: set, step: float) -> None:
-    """Y(가로) x Z(세로) 격자 판정 지도. O=선택, #=창까지 사용 가능, +=사용 가능, 그 외는 탈락 사유."""
+def print_map(evals: dict, chosen: list, window_ok: set, step: float) -> None:
+    """Y(가로) x Z(세로) 격자 판정 지도. 숫자=고른 세트 번호, #=창까지 사용 가능, +=사용 가능, 그 외는 탈락 사유."""
     if not evals:
         return
+    rank_of = {k: str(rank) for rank, k in enumerate(chosen, start=1)}
     iys = sorted({k[0] for k in evals})
     izs = sorted({k[1] for k in evals}, reverse=True)
     print(f"  지도 (가로 Y {iys[0] * step:+.2f}~{iys[-1] * step:+.2f} m, 세로 Z, {step * 100:.0f}cm 간격): "
-          "O 선택, # 창까지 사용 가능, + 사용 가능, . IK 없음, m 관절여유, c 충돌, a 오차, p 플랫폼")
+          "숫자 세트 번호, # 창까지 사용 가능, + 사용 가능, . IK 없음, m 관절여유, c 충돌, a 오차, p 플랫폼")
     for iz in izs:
         row = []
         for iy in iys:
@@ -602,8 +655,8 @@ def print_map(evals: dict, chosen, window_ok: set, step: float) -> None:
             e = evals.get(k)
             if e is None:
                 row.append(" ")
-            elif k == chosen:
-                row.append("O")
+            elif k in rank_of:
+                row.append(rank_of[k])
             elif not e.reject:
                 row.append("#" if k in window_ok else "+")
             else:
@@ -614,8 +667,11 @@ def print_map(evals: dict, chosen, window_ok: set, step: float) -> None:
 def _parse_args(argv):
     d = SolverConfig()
     ap = argparse.ArgumentParser(
-        description="아치 타깃 번호별 플랫폼 Y/Z + 팔 관절해 1세트 계산(오프라인, 로봇 안 움직임)")
+        description="아치 타깃 번호별 플랫폼 Y/Z + 팔 관절해 후보 세트 계산(오프라인, 로봇 안 움직임)")
     ap.add_argument("--indices", type=int, nargs="+", default=[21, 32], help="타깃 번호들 (기본 21 32)")
+    ap.add_argument("--sets", type=int, default=d.num_sets, help=f"타깃마다 낼 세트 수 1~9 (기본 {d.num_sets})")
+    ap.add_argument("--min-separation", type=float, default=d.min_separation_m,
+                    help=f"세트끼리 플랫폼 위치 최소 거리(m) (기본 {d.min_separation_m})")
     ap.add_argument("--standoff", type=float, default=d.standoff_m, help="coverage planner target_standoff_m")
     ap.add_argument("--x-fixed", type=float, default=d.x_fixed_m)
     ap.add_argument("--panel-height", type=float, default=d.panel_height_m)
@@ -629,7 +685,12 @@ def _parse_args(argv):
     ap.add_argument("--detail", action="store_true", help="판정별 수치와 적용 명령까지 자세히 출력")
     ap.add_argument("--map", action="store_true", help="격자 판정 지도 출력")
     ap.add_argument("--output", help="결과를 JSON으로 저장할 경로")
-    return ap.parse_args(argv)
+    args = ap.parse_args(argv)
+    if not 1 <= args.sets <= 9:
+        ap.error("--sets는 1~9 (지도에 세트 번호를 한 글자로 찍는다)")
+    if args.min_separation < 0:
+        ap.error("--min-separation은 0 이상")
+    return args
 
 
 def main(argv=None) -> int:
@@ -640,6 +701,7 @@ def main(argv=None) -> int:
         grid_step_m=args.grid_step, reach_radius_m=args.reach_radius, window_m=args.window,
         min_margin_deg=args.min_margin_deg, min_clearance_m=args.min_clearance,
         platform_size_y=args.platform_size_y, platform_thickness=args.platform_thickness,
+        num_sets=args.sets, min_separation_m=args.min_separation,
     )
     geom.self_check_normal_signs()
     solver = ArchTargetSolver(cfg)
@@ -652,7 +714,8 @@ def main(argv=None) -> int:
     if args.detail:
         print(f"\n아치 타깃 {n}개 중 {args.indices} 계산 - standoff {cfg.standoff_m * 100:.0f}cm, "
               f"x_fixed {cfg.x_fixed_m:.2f}, 플랫폼 Y[{cfg.platform_min_y}, {cfg.platform_max_y}] "
-              f"Z[{cfg.platform_min_z}, {cfg.platform_max_z}]")
+              f"Z[{cfg.platform_min_z}, {cfg.platform_max_z}], 타깃마다 최대 {cfg.num_sets}세트"
+              f"(세트끼리 플랫폼 위치 {cfg.min_separation_m * 100:.0f}cm 이상 차이)")
     else:
         print_table_header(cfg)
     results, maps = [], []
@@ -675,7 +738,7 @@ def main(argv=None) -> int:
         for index, evals, chosen, window_ok in maps:
             print(f"\n[{index}] 격자 판정 지도")
             print_map(evals, chosen, window_ok, cfg.grid_step_m)
-        print("플랫폼 적용: ros2 param set /platform_control_node target_y <Y> 와 target_z <Z>")
+        print("플랫폼 적용(쓸 세트 하나의 Y/Z): ros2 param set /platform_control_node target_y <Y> 와 target_z <Z>")
         print("자세한 검사 결과는 같은 명령 끝에 --detail을 붙여 다시 실행:")
         print(f"  {rerun_command(argv, '--detail')}")
 
