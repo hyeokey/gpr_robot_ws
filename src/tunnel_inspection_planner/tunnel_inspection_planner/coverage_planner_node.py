@@ -23,9 +23,11 @@ import math
 
 import numpy as np
 import rclpy
+import tf2_ros
 from geometry_msgs.msg import Point, PoseStamped
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.time import Time as RclpyTime
 from visualization_msgs.msg import Marker, MarkerArray
 
 from tunnel_inspection_planner import tunnel_geometry as geom
@@ -60,8 +62,9 @@ class CoveragePlannerNode(Node):
     def __init__(self):
         super().__init__("coverage_planner_node")
 
-        # x_fixed_m: world 프레임에서 base_link의 X 좌표.
-        # 실물 팔(RViz /tf): base_link = world 원점 → 0.0 / Gazebo HIL(spawn_x=2.5): 2.5
+        # x_fixed_m: world 프레임에서 base_link의 TF 기준 X 좌표.
+        # 실물 팔 / Gazebo HIL 모두 0.0 - spawn_x=2.5는 Gazebo 물리 배치일 뿐,
+        # URDF의 world 링크가 고정 루트라서 TF 체인에는 X 오프셋이 포함되지 않음.
         self.declare_parameter("x_fixed_m", 0.0)
         self.declare_parameter("panel_height_m", 0.30)  # 판떼기 세로 치수(m)
         self.declare_parameter("target_index", -1)      # -1 = 마커만, >=0 = 해당 타깃 발행
@@ -70,11 +73,21 @@ class CoveragePlannerNode(Node):
 
         geom.self_check_normal_signs()
 
+        # TF: world → base_link 변환으로 arm 위치를 자동으로 읽음.
+        # HIL 모드에서는 launch 시 --remap /tf:=/sim/tf 로 /sim/tf 를 구독.
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+
         self.marker_pub = self.create_publisher(MarkerArray, f"/{NS}/markers", TRANSIENT)
         self.target_pose_pub = self.create_publisher(PoseStamped, "/piper/target_pose", TRANSIENT)
         self.wall_plane_pub = self.create_publisher(PoseStamped, "/piper/locked_wall_plane", TRANSIENT)
 
         self._run()
+
+        # spin 시작 후 주기적으로 재발행:
+        # - 마커: TRANSIENT_LOCAL 보조 (늦게 뜬 RViz도 수신)
+        # - 제어 토픽: TF가 spin 후에야 쌓이므로 타이머에서 첫 발행 (약 2초 지연)
+        self.create_timer(2.0, self._republish_markers)
 
     def _run(self):
         x_fixed_m = float(self.get_parameter("x_fixed_m").value)
@@ -91,6 +104,7 @@ class CoveragePlannerNode(Node):
             f"(panel_height={panel_height_m*100:.0f}cm, θ_step={step_deg:.3f}°, {N} 구간)."
         )
 
+        self._waypoints = waypoints
         self._publish_markers(waypoints, x_fixed_m, target_index)
 
         if target_index < 0:
@@ -107,22 +121,54 @@ class CoveragePlannerNode(Node):
             return
 
         wp = waypoints[target_index]
-        self._publish_control(wp, target_standoff_m)
+        self._selected_wp = wp
+        # 제어 토픽은 TF가 spin 후에야 사용 가능 → 타이머(_republish_markers)에서 첫 발행
+        self.get_logger().warn(
+            f"⚠️  타깃 [{wp.index}] θ={wp.theta_deg:.2f}° 선택됨 "
+            f"(standoff={target_standoff_m*100:.0f}cm). "
+            "TF 준비 후(~2초) 제어 토픽 발행 시작 - piper_controller_node가 떠 있으면 팔이 이동합니다."
+        )
 
-    def _publish_control(self, wp, target_standoff_m):
-        """선택된 웨이포인트를 /piper/target_pose + /piper/locked_wall_plane 으로 발행."""
+    def _get_arm_base(self):
+        """TF(world → base_link)에서 arm base_link의 world 기준 위치를 읽어온다.
+        HIL: /tf 를 /sim/tf 로 remap 해서 실행해야 플랫폼 위치가 반영됨."""
+        try:
+            t = self._tf_buffer.lookup_transform("world", "base_link", RclpyTime())
+            tr = t.transform.translation
+            return np.array([tr.x, tr.y, tr.z])
+        except Exception as e:
+            self.get_logger().warn(
+                f"TF lookup 실패 (world→base_link): {e}",
+                throttle_duration_sec=5.0,
+            )
+            return None
+
+    def _publish_control(self, wp, target_standoff_m, silent=False):
+        """선택된 웨이포인트를 /piper/target_pose + /piper/locked_wall_plane 으로 발행.
+
+        world → base_link 변환을 TF에서 자동으로 읽음.
+        HIL 모드에서는 launch 시 --remap /tf:=/sim/tf 로 실행해야 플랫폼 위치 반영.
+        """
+        arm_base = self._get_arm_base()
+        if arm_base is None:
+            return  # TF 미준비, 다음 타이머 틱에서 재시도
+
         stamp = self.get_clock().now().to_msg()
+        x_fixed_m = float(self.get_parameter("x_fixed_m").value)
+        arm_base = np.array([x_fixed_m, arm_base[1], arm_base[2]])
 
-        # 타깃 위치: 벽 표면에서 standoff 만큼 법선 방향으로 물러남
-        # wp.normal_world = inward normal (벽→터널 내부, 로봇 쪽)
-        target_pos = wp.position_world + target_standoff_m * wp.normal_world
+        # 타깃 위치 (world) → base_link 기준으로 변환
+        target_world = wp.position_world + target_standoff_m * wp.normal_world
+        target_pos = target_world - arm_base
 
-        # 타깃 자세: link6 +Z = 접근 방향 = 벽을 향하는 방향 = -inward_normal
+        # 벽 표면점도 base_link 기준으로 변환
+        surface_base = wp.position_world - arm_base
+
         approach_dir = -wp.normal_world
         qx, qy, qz, qw = _quat_from_z_axis(approach_dir)
 
         pose = PoseStamped()
-        pose.header.frame_id = str(self.get_parameter("base_frame").value)
+        pose.header.frame_id = "base_link"
         pose.header.stamp = stamp
         pose.pose.position.x = float(target_pos[0])
         pose.pose.position.y = float(target_pos[1])
@@ -133,33 +179,39 @@ class CoveragePlannerNode(Node):
         pose.pose.orientation.w = qw
         self.target_pose_pub.publish(pose)
 
-        # 벽 평면: 위치=표면점, orientation=quat_from_z_axis(inward_normal) 부호반전 없음
-        # contact_planner_node / tunnel_wall_detector_node 와 동일한 컨벤션
+        # 벽 평면: 위치=표면점(base_link 기준), orientation=quat_from_z_axis(inward_normal)
         wx, wy, wz, ww = _quat_from_z_axis(wp.normal_world)
         wall_plane = PoseStamped()
-        wall_plane.header.frame_id = str(self.get_parameter("base_frame").value)
+        wall_plane.header.frame_id = "base_link"
         wall_plane.header.stamp = stamp
-        wall_plane.pose.position.x = float(wp.position_world[0])
-        wall_plane.pose.position.y = float(wp.position_world[1])
-        wall_plane.pose.position.z = float(wp.position_world[2])
+        wall_plane.pose.position.x = float(surface_base[0])
+        wall_plane.pose.position.y = float(surface_base[1])
+        wall_plane.pose.position.z = float(surface_base[2])
         wall_plane.pose.orientation.x = wx
         wall_plane.pose.orientation.y = wy
         wall_plane.pose.orientation.z = wz
         wall_plane.pose.orientation.w = ww
         self.wall_plane_pub.publish(wall_plane)
 
-        self.get_logger().warn(
-            f"⚠️  타깃 [{wp.index}] θ={wp.theta_deg:.2f}° 발행 완료 "
-            f"(standoff={target_standoff_m*100:.0f}cm). "
-            "piper_controller_node가 떠 있으면 팔이 즉시 이동 시작합니다."
-        )
-        self.get_logger().info(
-            f"  surface={np.round(wp.position_world, 4)}, "
-            f"normal={np.round(wp.normal_world, 4)}, "
-            f"target={np.round(target_pos, 4)}"
-        )
+        if not silent:
+            self.get_logger().info(
+                f"  surface_world={np.round(wp.position_world, 4)}, "
+                f"arm_base={np.round(arm_base, 4)}, "
+                f"target_base_link={np.round(target_pos, 4)}"
+            )
 
     # ------------------------------------------------------------------ 시각화 ---------------
+
+    def _republish_markers(self):
+        """2초마다 마커 + 제어 토픽 재발행 - 늦게 연결된 노드도 받을 수 있게."""
+        if not hasattr(self, '_waypoints'):
+            return
+        x_fixed_m = float(self.get_parameter("x_fixed_m").value)
+        target_index = int(self.get_parameter("target_index").value)
+        self._publish_markers(self._waypoints, x_fixed_m, target_index)
+        if target_index >= 0 and hasattr(self, '_selected_wp'):
+            target_standoff_m = float(self.get_parameter("target_standoff_m").value)
+            self._publish_control(self._selected_wp, target_standoff_m, silent=True)
 
     def _publish_markers(self, waypoints, x_fixed_m, selected_index):
         base_frame = str(self.get_parameter("base_frame").value)
@@ -206,6 +258,8 @@ class CoveragePlannerNode(Node):
             sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.10 if is_selected else 0.06
             if is_selected:
                 sphere.color.r, sphere.color.g, sphere.color.b, sphere.color.a = 1.0, 0.8, 0.0, 1.0
+            elif wp.index == 0:
+                sphere.color.r, sphere.color.g, sphere.color.b, sphere.color.a = 1.0, 0.0, 0.0, 1.0
             else:
                 sphere.color.r, sphere.color.g, sphere.color.b, sphere.color.a = 0.0, 0.7, 1.0, 0.7
             sphere.lifetime.sec = 0

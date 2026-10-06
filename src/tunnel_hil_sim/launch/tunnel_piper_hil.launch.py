@@ -326,6 +326,10 @@ def _launch_setup(context, *args, **kwargs):
             output="screen",
             arguments=["-d", str(rviz_config)],
             condition=IfCondition(LaunchConfiguration("rviz")),
+            remappings=[
+                ("/tf", "/sim/tf"),
+                ("/tf_static", "/sim/tf_static"),
+            ],
         ),
     ]
     return actions
@@ -392,8 +396,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("platform_max_y", default_value="4.0"),
             DeclareLaunchArgument("platform_min_z", default_value="0.5"),
             DeclareLaunchArgument("platform_max_z", default_value="7.0"),
-            DeclareLaunchArgument("platform_size_x", default_value="1.0"),
-            DeclareLaunchArgument("platform_size_y", default_value="0.8"),
+            DeclareLaunchArgument("platform_size_x", default_value="0.5"),
+            DeclareLaunchArgument("platform_size_y", default_value="0.5"),
             DeclareLaunchArgument("platform_thickness", default_value="0.15"),
             DeclareLaunchArgument(
                 "platform_gui", default_value="true",
